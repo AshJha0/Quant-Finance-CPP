@@ -35,7 +35,20 @@ solvers are bracket-checked and never return an endpoint.
 | `alpha` | Research pipeline: context/factors/evaluator/validation/backtester/construction/report, Fama-MacBeth, calendar anomalies |
 | `microstructure` | Almgren-Chriss, TCA, impact models, seasonality curves (per-bucket seeding), queue/fill models, Lee-Ready, VPIN, Hawkes, EWMA covariance, Avellaneda-Stoikov, ensemble + online learner |
 
-178 headers - 506 tests across 52 executables, all green.
+237 headers - 730 tests across 81 executables, all green.
+
+Phase 5 (done): the live trading lane -- `HftMarketDataBus`
+(copy-on-write listeners, SPSC rings), `SymbolRegistry`, async tick
+capture with honest drop counting, `HftOrderGateway`,
+`ShardedTradingEngine`, `GlobalRiskAggregator` (hysteretic breaker),
+`HftQuoter`/`AutoHedger`, `PaperTradingGateway`, `SignalEngine`; the
+full `execution/` package (TWAP/VWAP/POV/IS schedulers, SOR + adaptive
+routing, dark-pool MEQ dry-run, BenchmarkExecutor, PortfolioExecutor);
+and `persist/Checkpoint` byte-identical to the Java/Python format --
+a checkpoint written by Python restores in C++ (pinned by test).
+The deterministic 1M-op soak asserts exact conservation
+(processed == submitted == delivered); tick-to-strategy through the
+real bus measures p50 228 ns (Java baseline 204 ns).
 
 **Measured nanosecond benchmarks** (`benchmarks/ull_bench.cpp`, medians
 on an unpinned Windows box -- the binary prints its own caveats):
@@ -62,8 +75,8 @@ a guided tour with compiled-and-run snippets, five worked experiments
 teaching material (1000 exercises, 300 recipes, 100 diagrams -- the
 concepts transfer 1:1, only syntax differs).
 
-Remaining: the live-bus/threading layer (market-data bus, feeds,
-gateways, sharded engine) -- the last Java-only territory.
+Remaining (deliberate): WebSocket feeds, the HTML dashboard, CLI and
+report generators -- JVM-app conveniences, not library logic.
 
 ## Build and test
 
