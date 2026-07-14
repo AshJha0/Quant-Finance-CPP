@@ -23,12 +23,14 @@
 #include <vector>
 
 #include "quantfinlib/backtest/validation/splittable_random.hpp"
+#include "quantfinlib/marketdata/hft_market_data_bus.hpp"
 #include "quantfinlib/orderbook/hft_order_book.hpp"
 #include "quantfinlib/trading/hft_risk_gate.hpp"
 #include "quantfinlib/trading/order_ring_buffer.hpp"
 #include "quantfinlib/util/latency_recorder.hpp"
 #include "quantfinlib/util/tick_ring_buffer.hpp"
 
+using quantfinlib::HftMarketDataBus;
 using quantfinlib::HftOrderBook;
 using quantfinlib::HftRiskGate;
 using quantfinlib::LatencyRecorder;
@@ -241,7 +243,51 @@ void benchRingHandoff() {
 }
 
 // ------------------------------------------------------------------
-// (d) Tick-to-order composite (single-threaded pipeline walk)
+// (d) Tick -> strategy via the full HftMarketDataBus (Phase 5A)
+// ------------------------------------------------------------------
+
+void benchBusTickToStrategy() {
+    // Same cross-thread hand-off measurement as (c), but through the real
+    // HftMarketDataBus -- SymbolRegistry-resolved id, the bus's own
+    // consumer thread/loop, and subscribeAll dispatch -- rather than a bare
+    // TickRingBuffer, so this is the Java HftMarketDataBusBenchmark
+    // "publish -> strategy" number's direct C++ counterpart.
+    HftMarketDataBus bus(1 << 10, 4, false);
+    int symbol = bus.registerSymbol("BENCH");
+    constexpr int SAMPLES = 200000;
+    LatencyRecorder rec;
+    std::uint64_t ovh = rdtscOverheadCycles();
+    std::atomic<int> received{0};
+
+    bus.subscribeAll([&](int, double, double, std::int64_t sentTsc) {
+        std::uint64_t now = rdtsc();
+        rec.record(toNs(now - static_cast<std::uint64_t>(sentTsc), ovh));
+        received.fetch_add(1, std::memory_order_relaxed);
+    });
+    bus.start();
+
+    // Paced producer: one message per ~2 us so each sample measures the
+    // hand-off latency, not queue wait inside a burst (same pacing as (c)).
+    for (int i = 0; i < SAMPLES; i++) {
+        while (!bus.publish(symbol, 100.0, 1.0, static_cast<std::int64_t>(rdtsc()))) {
+        }
+        std::uint64_t until = rdtsc()
+                + static_cast<std::uint64_t>(2000.0 / g_nsPerCycle);
+        while (rdtsc() < until) {
+        }
+    }
+    while (received.load(std::memory_order_relaxed) < SAMPLES) {
+    }
+    bus.close();
+
+    std::printf("%-28s cross-thread (via bus)   | rdtsc p50 %5lld ns  p99 %7lld ns | Java: publish->strategy p50 204 ns\n",
+                "bus tick->strategy",
+                static_cast<long long>(rec.percentile(0.50)),
+                static_cast<long long>(rec.percentile(0.99)));
+}
+
+// ------------------------------------------------------------------
+// (e) Tick-to-order composite (single-threaded pipeline walk)
 // ------------------------------------------------------------------
 
 void benchTickToOrder() {
@@ -323,6 +369,7 @@ int main() {
     benchGateCheck();
     benchBookMixed();
     benchRingHandoff();
+    benchBusTickToStrategy();
     benchTickToOrder();
     return 0;
 }

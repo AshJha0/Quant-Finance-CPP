@@ -87,4 +87,20 @@ double VolumeCurve::expectedVolumeRemaining(int bucket, double fracWithinBucket)
     return std::max(0.0, projectedDayVolume(bucket, fracWithinBucket) - realizedToday());
 }
 
+void VolumeCurve::writeState(BinWriter& out) const {
+    out.writeByte(1);
+    out.writeInt(daysLearned_);
+    Checkpoint::writeDoubles(out, profileEwma_);
+}
+
+void VolumeCurve::readState(BinReader& in) {
+    Checkpoint::requireVersion(in, 1, "VolumeCurve");
+    std::int32_t days = in.readInt();
+    Checkpoint::readDoublesInto(in, profileEwma_);
+    daysLearned_ = days;
+    rebuildPrefixSums();
+    std::fill(today_.begin(), today_.end(), 0.0);
+    todayTotal_ = 0;
+}
+
 }  // namespace quantfinlib

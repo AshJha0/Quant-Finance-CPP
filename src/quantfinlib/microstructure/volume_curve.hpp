@@ -6,10 +6,14 @@
 // seeds the WHOLE profile from `daysLearned == 0`, not per bucket -- here
 // a zero bucket IS a real observation (no prints = no volume), so seeding
 // per-bucket would bias sparse-early-day buckets. Persistence
-// (persist.Checkpoint) is not ported -- see EwmaCovariance's note.
+// (persist::Checkpoint): writeState/readState persist the learned profile
+// (cross-day state) only; intraday state resets on read. Format version
+// 1, matching Java's VolumeCurve.writeState/readState byte for byte.
 #pragma once
 
 #include <vector>
+
+#include "quantfinlib/persist/checkpoint.hpp"
 
 namespace quantfinlib {
 
@@ -47,6 +51,16 @@ public:
 
     int buckets() const { return buckets_; }
     int daysLearned() const { return daysLearned_; }
+
+    /** Persists the learned profile (cross-day state) -- see persist::Checkpoint. */
+    void writeState(BinWriter& out) const;
+
+    /**
+     * Restores the learned profile; intraday state resets (restore at
+     * session start). Throws std::runtime_error if the checkpoint was
+     * written with a different bucket count or an unknown state version.
+     */
+    void readState(BinReader& in);
 
 private:
     void rebuildPrefixSums();

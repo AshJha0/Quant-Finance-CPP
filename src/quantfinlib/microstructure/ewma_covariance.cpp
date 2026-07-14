@@ -102,4 +102,17 @@ void EwmaCovariance::requireLength(const std::vector<double>& a) const {
     }
 }
 
+void EwmaCovariance::writeState(BinWriter& out) const {
+    out.writeByte(1);
+    out.writeLong(samples_);
+    Checkpoint::writeDoubles(out, tri_);
+}
+
+void EwmaCovariance::readState(BinReader& in) {
+    Checkpoint::requireVersion(in, 1, "EwmaCovariance");
+    std::int64_t persisted = in.readLong();
+    Checkpoint::readDoublesInto(in, tri_);
+    samples_ = persisted;
+}
+
 }  // namespace quantfinlib

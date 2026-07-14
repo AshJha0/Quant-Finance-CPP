@@ -2,13 +2,15 @@
 // covariance matrix, cov <- lambda*cov + (1-lambda)*ri*rj, zero-mean
 // convention. The matrix stays PSD because every update is a full-vector
 // rank-1 outer product -- a sample with ANY non-finite return is dropped
-// whole. Lower triangle stored flat. Persistence (persist.Checkpoint) is
-// NOT ported: that Java serialization framework has no C++ port yet and
-// is out of this phase's scope; the learned-state read/write is the only
-// omission versus the Java source.
+// whole. Lower triangle stored flat. Persistence (persist::Checkpoint):
+// writeState/readState persist the learned covariance matrix and sample
+// count; format version 1, matching Java's EwmaCovariance.writeState/
+// readState byte for byte.
 #pragma once
 
 #include <vector>
+
+#include "quantfinlib/persist/checkpoint.hpp"
 
 namespace quantfinlib {
 
@@ -49,6 +51,12 @@ public:
 
     int symbols() const { return symbols_; }
     long samples() const { return samples_; }
+
+    /** Persists the learned matrix -- see persist::Checkpoint. */
+    void writeState(BinWriter& out) const;
+
+    /** Restores the matrix. Throws std::runtime_error on a basket-size or version mismatch. */
+    void readState(BinReader& in);
 
 private:
     void requireLength(const std::vector<double>& a) const;
