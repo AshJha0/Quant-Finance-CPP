@@ -13,7 +13,7 @@ including a bit-exact `SplittableRandom` so seeded Monte Carlo replays
 the Java streams. NaN-rejecting input gates throw `std::invalid_argument`;
 solvers are bracket-checked and never return an endpoint.
 
-## Phase 1 (current): the quant core
+## What's ported (Phases 1-3)
 
 | Package | Contents |
 |---|---|
@@ -27,15 +27,30 @@ solvers are bracket-checked and never return an endpoint.
 | `risk` | Four VaR flavors + ES, component VaR (Euler), Ledoit-Wolf shrinkage, EVT, stress + reverse stress, FRTB ES, P&L attribution (KS), VaR backtests, PCA, Gaussian/t copulas, concentration, counterparty PFE, settlement risk |
 | `volatility` | EWMA, GARCH/GJR/EGARCH, HAR-RV, model-free vol index, range estimators (Parkinson/GK/RS/Yang-Zhang), AIC/BIC, vol decomposition |
 | `indicators` | Batch + streaming indicator set (SMA/EMA/RSI/MACD/Bollinger/ATR/VWAP...) |
-| `backtest` | Trade analytics, performance/drawdown analytics, benchmark comparison; `validation/` purged K-fold, CSCV overfit probability, block bootstrap, deflated Sharpe, Monte Carlo trade reshuffle; `portfolio/` position sizing, optimizers (MV/risk-parity/Black-Litterman/constrained) |
+| `backtest` | Full strategy engine (Backtester, 5 strategies, cost models, execution models with the cash-conservation contract, walk-forward with warm folds, grid search) + trade/performance/drawdown analytics; `validation/` purged K-fold, CSCV overfit probability, block bootstrap, deflated Sharpe, Monte Carlo trade reshuffle, bit-exact Java SplittableRandom; `portfolio/` position sizing, optimizers, portfolio backtester |
+| `orderbook` | HftOrderBook (dense ladder, bitmaps, pooled nodes, IOC/FOK/post-only) proven equivalent to the reference book under random operation streams |
+| `trading` | HftRiskGate (atomics, reduce-vs-flip), order ring buffer |
+| `fx` | Currency-pair conventions + calendars, swap points, FX swaps/NDFs, delta-quoted vol surface (premium-adjusted), tier book, LP scorecard/router |
+| `crb` | Central risk book: factor-space netting, skewed quoting, internalization, L1 hedge optimizer, auto-hedger, router, P&L ledger |
+| `alpha` | Research pipeline: context/factors/evaluator/validation/backtester/construction/report, Fama-MacBeth, calendar anomalies |
+| `microstructure` | Almgren-Chriss, TCA, impact models, seasonality curves (per-bucket seeding), queue/fill models, Lee-Ready, VPIN, Hawkes, EWMA covariance, Avellaneda-Stoikov, ensemble + online learner |
 
-86 headers - 270 tests across 28 executables, all green.
+178 headers - 506 tests across 52 executables, all green.
 
-Phase 2 (planned): the execution/microstructure layer -- order book,
-lock-free rings, market-making loop -- with re-runnable nanosecond
-benchmarks (this is where C++ is expected to beat the Java baselines of
-204 ns tick-to-strategy / 504 ns tick-to-order). Phase 3: the teaching
-docs adapted to C++.
+**Measured nanosecond benchmarks** (`benchmarks/ull_bench.cpp`, medians
+on an unpinned Windows box -- the binary prints its own caveats):
+gate check 2.7 ns/op (Java ~3 ns), book mixed add/cancel 49.5 ns/op
+(Java ~204 ns), ring publish-to-consume p50 98 ns (Java 204 ns),
+tick-to-order composite p50 47 ns (Java p50 504 ns). The zero-allocation
+claim is enforced by a counting `operator new` hook over a million
+steady-state operations.
+
+**Cross-port verified**: an identical probe battery runs against Java,
+C++, and Python (138 labels) and diffs to zero mismatches -- the harness
+lives in the Python repo at `tools/crossport/`.
+
+Remaining (Phase 4): connectivity (FIX engine, feeds, SBE/ITCH codecs)
+and the teaching docs adapted to C++.
 
 ## Build and test
 
