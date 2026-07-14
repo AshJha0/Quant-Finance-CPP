@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(quant_finance_cpp VERSION 0.1.0 LANGUAGES CXX)
+project(quant_finance_cpp VERSION 1.0.0 LANGUAGES CXX)
 
 # C++ port of Quant-Finance-Library (Java). Zero external dependencies:
 # the standard library only, tests on a vendored micro-harness.

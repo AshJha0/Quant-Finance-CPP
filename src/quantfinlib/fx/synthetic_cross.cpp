@@ -14,11 +14,11 @@ bool priced(double p) {
 
 }  // namespace
 
-double syntheticAsk(CrossOp op, double bidA, double askA, double bidB, double askB) {
+double syntheticAsk(CrossOp op, double /*bidA*/, double askA, double bidB, double askB) {
     return op == CrossOp::MULTIPLY ? askA * askB : askA / bidB;
 }
 
-double syntheticBid(CrossOp op, double bidA, double askA, double bidB, double askB) {
+double syntheticBid(CrossOp op, double bidA, double /*askA*/, double bidB, double askB) {
     return op == CrossOp::MULTIPLY ? bidA * bidB : bidA / askB;
 }
 

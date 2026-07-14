@@ -3,7 +3,7 @@
 #include <string>
 
 TEST(version_is_set) {
-    EXPECT_TRUE(std::string(quantfinlib::kVersion) == "0.1.0");
+    EXPECT_TRUE(std::string(quantfinlib::kVersion) == "1.0.0");
 }
 
 QTEST_MAIN()

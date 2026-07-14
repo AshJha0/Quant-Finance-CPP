@@ -59,7 +59,7 @@ claim is enforced by a counting `operator new` hook over a million
 steady-state operations.
 
 **Cross-port verified**: an identical probe battery runs against Java,
-C++, and Python (138 labels) and diffs to zero mismatches -- the harness
+C++, and Python (156 labels) and diffs to zero mismatches -- the harness
 lives in the Python repo at `tools/crossport/`.
 
 Phase 4 (done): `fix/` -- the full FIX 4.4 engine (codec, incremental
