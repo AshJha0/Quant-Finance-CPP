@@ -49,8 +49,21 @@ steady-state operations.
 C++, and Python (138 labels) and diffs to zero mismatches -- the harness
 lives in the Python repo at `tools/crossport/`.
 
-Remaining (Phase 4): connectivity (FIX engine, feeds, SBE/ITCH codecs)
-and the teaching docs adapted to C++.
+Phase 4 (done): `fix/` -- the full FIX 4.4 engine (codec, incremental
+framer with the zombie-session guard, garbage-free encoder/view,
+initiator/acceptor session over sockets with resend recovery and
+ResetSeqNumFlag, durable session store); `marketdata/` + `sbe/` --
+ITCH codec, L3 book builder with exact queue position, NBBO, byte-exact
+SBE flyweights; `data/` QFLT tick files.
+
+**New to the codebase?** Start with [docs/LEARN.md](docs/LEARN.md) --
+a guided tour with compiled-and-run snippets, five worked experiments
+(including the benchmark run), and pointers into the Java repo's
+teaching material (1000 exercises, 300 recipes, 100 diagrams -- the
+concepts transfer 1:1, only syntax differs).
+
+Remaining: the live-bus/threading layer (market-data bus, feeds,
+gateways, sharded engine) -- the last Java-only territory.
 
 ## Build and test
 
