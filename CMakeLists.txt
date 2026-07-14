@@ -18,6 +18,12 @@ file(GLOB_RECURSE QFL_SOURCES CONFIGURE_DEPENDS src/quantfinlib/*.cpp)
 add_library(quantfinlib STATIC ${QFL_SOURCES})
 target_include_directories(quantfinlib PUBLIC src)
 
+# FIX engine (Phase 4B) needs winsock on Windows; tests link only against
+# quantfinlib, so the socket lib is attached here rather than per-test.
+if(WIN32)
+    target_link_libraries(quantfinlib PUBLIC ws2_32)
+endif()
+
 # One test executable per tests/*_test.cpp, registered with CTest.
 enable_testing()
 file(GLOB QFL_TESTS CONFIGURE_DEPENDS tests/*_test.cpp)
