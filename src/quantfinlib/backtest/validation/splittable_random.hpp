@@ -25,6 +25,11 @@ public:
         return static_cast<double>(mix64(nextSeed()) >> 11) * 0x1.0p-53;
     }
 
+    /** Java's nextBoolean(): sign bit of mix32. */
+    bool nextBoolean() {
+        return static_cast<std::int32_t>(mix32(nextSeed())) < 0;
+    }
+
     /** Uniform in [0, bound); bound > 0. Java's power-of-two fast path + rejection. */
     int nextInt(int bound) {
         if (bound <= 0) {

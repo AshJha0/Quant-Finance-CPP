@@ -28,3 +28,13 @@ foreach(test_src ${QFL_TESTS})
     target_include_directories(${test_name} PRIVATE tests)
     add_test(NAME ${test_name} COMMAND ${test_name})
 endforeach()
+
+# One benchmark executable per benchmarks/*_bench.cpp (built, never run by
+# CTest: nanosecond numbers belong to a quiet, manually invoked machine).
+file(GLOB QFL_BENCHES CONFIGURE_DEPENDS benchmarks/*_bench.cpp)
+foreach(bench_src ${QFL_BENCHES})
+    get_filename_component(bench_name ${bench_src} NAME_WE)
+    add_executable(${bench_name} ${bench_src})
+    target_link_libraries(${bench_name} PRIVATE quantfinlib)
+    target_compile_options(${bench_name} PRIVATE -O3)
+endforeach()
