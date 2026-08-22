@@ -16,6 +16,9 @@ std::vector<std::int64_t> allocateProportionally(std::int64_t total, const std::
         if (w < 0) {
             throw std::invalid_argument("negative weight: " + std::to_string(w));
         }
+        if (!std::isfinite(w)) {
+            throw std::invalid_argument("non-finite weight: " + std::to_string(w));
+        }
         sum += w;
     }
     std::vector<std::int64_t> out(n, 0);

@@ -107,4 +107,31 @@ TEST(validationRejectsBadInput) {
     EXPECT_THROWS(FxVolSurface::strikeForDelta(F, ATM, T, 0.999, true, true));
 }
 
+TEST(addRejectsRrBfCombinationThatProducesNonPositiveWingVol) {
+    // atm + bf25 - rr25/2 goes to zero/negative for an aggressive combination.
+    EXPECT_THROWS(FxVolSurface::builder().add(T, F, 0.05, 0.20, -0.03));
+}
+
+TEST(strikeForDeltaAcceptsPaDeltaNearTheTrueContinuousPeak) {
+    // A delta right at the edge of the coarse 200-point grid's discretely-
+    // sampled maximum must still resolve -- the golden-section refinement
+    // closes the gap to the true continuous peak.
+    double sv = ATM * std::sqrt(T);
+    double lo = F * std::exp(-8 * sv);
+    double hi = F * std::exp(8 * sv);
+    double gridPeakVal = -1;
+    for (int i = 0; i <= 200; i++) {
+        double k = lo * std::pow(hi / lo, i / 200.0);
+        double sv2 = ATM * std::sqrt(T);
+        double d2 = std::log(F / k) / sv2 - 0.5 * sv2;
+        double v = (k / F) * math_utils::normCdf(d2);
+        if (v > gridPeakVal) {
+            gridPeakVal = v;
+        }
+    }
+    double nearPeakDelta = gridPeakVal - 1e-9;
+    double k = FxVolSurface::strikeForDelta(F, ATM, T, nearPeakDelta, true, true);
+    EXPECT_TRUE(std::isfinite(k) && k > 0);
+}
+
 QTEST_MAIN()

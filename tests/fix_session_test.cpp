@@ -303,6 +303,29 @@ TEST(sequenceGapsAreDetected) {
     AWAIT_TRUE(f.client->expectedIncomingSeqNum() == 51, "gap not recovered");
 }
 
+TEST(resendRequestIsServicedWhileAnInboundGapIsStillOpen) {
+    SessionFixture f(30);
+    f.client->sendNewOrderSingle("ord-1", "EURUSD", Side::BUY, 100, 1.0851, NewOrderSingle::TIF_DAY);
+    AWAIT_TRUE(f.venueEvents.orders.size() == 1, "order not received");
+
+    // Venue jumps ahead, opening an inbound gap on the client side.
+    f.venue->forceOutgoingSeq(50);
+    f.venue->send(FixMessage::builder(FixMessage::HEARTBEAT));
+    EXPECT_TRUE(f.clientEvents.gap.await(5));
+
+    // While that gap is still open, the venue also asks the client to
+    // resend everything from seq 2 -- this must still be serviced, not
+    // dropped along with other non-critical inbound traffic (the client's
+    // own gap-triggered outbound RESEND_REQUEST already consumed seq 2, so
+    // the served range legitimately starts at 3).
+    f.venue->send(FixMessage::builder(FixMessage::RESEND_REQUEST)
+                          .field(FixMessage::BEGIN_SEQ_NO, static_cast<std::int64_t>(2))
+                          .field(FixMessage::END_SEQ_NO, static_cast<std::int64_t>(0)));
+
+    EXPECT_TRUE(f.clientEvents.resendServed.await(5));
+    EXPECT_TRUE(f.clientEvents.resendBegin.load() == 2);
+}
+
 TEST(logoutHandshakeClosesBothSidesCleanly) {
     SessionFixture f(30);
     f.client->logout();

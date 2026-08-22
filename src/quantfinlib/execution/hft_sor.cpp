@@ -1,6 +1,7 @@
 #include "quantfinlib/execution/hft_sor.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
 #include <stdexcept>
 
@@ -54,7 +55,8 @@ std::int64_t HftSor::route(Side side, std::int64_t quantity, std::int32_t limitT
             }
             std::int32_t px = buy ? askTick_[static_cast<std::size_t>(v)] : bidTick_[static_cast<std::size_t>(v)];
             std::int64_t sz = buy ? askSize_[static_cast<std::size_t>(v)] : bidSize_[static_cast<std::size_t>(v)];
-            if (sz <= 0 || px == (buy ? NO_ASK : NO_BID) || (buy ? px > limitTick : px < limitTick)) {
+            if (sz <= 0 || px == (buy ? NO_ASK : NO_BID) || (buy ? px > limitTick : px < limitTick)
+                || !std::isfinite(feeTicks_[static_cast<std::size_t>(v)])) {
                 continue;
             }
             double allIn = buy ? px + feeTicks_[static_cast<std::size_t>(v)] : px - feeTicks_[static_cast<std::size_t>(v)];

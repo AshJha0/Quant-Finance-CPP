@@ -523,8 +523,11 @@ void FixSession::handle(const FixMessage& m) {
                          .field(FixMessage::BEGIN_SEQ_NO, expected)
                          .field(FixMessage::END_SEQ_NO, static_cast<std::int64_t>(0)));
         }
-        // Session-critical messages still act despite the gap.
-        if (!(type == FixMessage::LOGON || type == FixMessage::LOGOUT)) {
+        // Session-critical messages still act despite the gap -- including a
+        // peer's own RESEND_REQUEST, so gap recovery on both sides can
+        // proceed concurrently instead of one side stalling the other's.
+        if (!(type == FixMessage::LOGON || type == FixMessage::LOGOUT
+              || type == FixMessage::RESEND_REQUEST)) {
             return;
         }
     } else if (seq < expected) {

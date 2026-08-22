@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <stdexcept>
 
 namespace quantfinlib {
 namespace smart_order_router {
@@ -16,17 +17,40 @@ struct Candidate {
     std::int64_t size;
 };
 
+double sideDefaultLimit(Side side) {
+    return side == Side::BUY ? std::numeric_limits<double>::infinity() : -std::numeric_limits<double>::infinity();
+}
+
 }  // namespace
 
 RoutingPlan route(Side side, std::int64_t quantity, const std::vector<VenueQuote>& venues, bool preferDark) {
+    return route(side, quantity, venues, preferDark, sideDefaultLimit(side));
+}
+
+RoutingPlan route(Side side, std::int64_t quantity, const std::vector<VenueQuote>& venues, bool preferDark,
+                  double limitPrice) {
+    return route(side, quantity, venues, preferDark, limitPrice, 0, std::numeric_limits<std::int64_t>::max());
+}
+
+RoutingPlan route(Side side, std::int64_t quantity, const std::vector<VenueQuote>& venues, bool preferDark,
+                  double limitPrice, std::int64_t nowNanos, std::int64_t maxQuoteAgeNanos) {
+    if (quantity < 0) {
+        throw std::invalid_argument("quantity must be >= 0");
+    }
     int sgn = sign(side);
     std::vector<Candidate> candidates;
     candidates.reserve(venues.size());
     for (const VenueQuote& v : venues) {
         double price = v.dark ? v.mid() : (side == Side::BUY ? v.ask : v.bid);
         std::int64_t size = side == Side::BUY ? v.askSize : v.bidSize;
-        if (size <= 0 || std::isnan(price)) {
+        if (size <= 0 || std::isnan(price) || !std::isfinite(v.feeBps)) {
             continue;
+        }
+        if (nowNanos - v.lastUpdateNanos > maxQuoteAgeNanos) {
+            continue;  // stale quote, excluded from routing
+        }
+        if (sgn > 0 ? price > limitPrice : price < limitPrice) {
+            continue;  // through the limit
         }
         double allIn = price * (1 + sgn * v.feeBps / 1e4);
         candidates.push_back(Candidate{&v, price, allIn, size});

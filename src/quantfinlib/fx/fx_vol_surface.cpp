@@ -58,6 +58,16 @@ FxVolSurface::Builder& FxVolSurface::Builder::add(double expiryYears, double for
     if (expiryYears <= 0 || forward <= 0 || atmVol <= 0) {
         throw std::invalid_argument("expiry, forward and atm vol must be > 0");
     }
+    bool tenDelta = !std::isnan(rr10);
+    double v25c = atmVol + bf25 + rr25 / 2;
+    double v25p = atmVol + bf25 - rr25 / 2;
+    double v10c = tenDelta ? atmVol + bf10 + rr10 / 2 : std::numeric_limits<double>::quiet_NaN();
+    double v10p = tenDelta ? atmVol + bf10 - rr10 / 2 : std::numeric_limits<double>::quiet_NaN();
+    if (!std::isfinite(v25c) || v25c <= 0 || !std::isfinite(v25p) || v25p <= 0
+        || (tenDelta && (!std::isfinite(v10c) || v10c <= 0 || !std::isfinite(v10p) || v10p <= 0))) {
+        throw std::invalid_argument(
+            "risk-reversal/butterfly combination produces a non-positive or non-finite wing vol");
+    }
     quotes_.push_back({expiryYears, forward, atmVol, rr25, bf25, rr10, bf10});
     return *this;
 }
@@ -136,12 +146,49 @@ double FxVolSurface::strikeForDelta(double forward, double vol, double tYears, d
     if (isCall) {
         double peak = lo;
         double peakVal = -1;
+        int peakIdx = 0;
         for (int i = 0; i <= 200; i++) {
             double k = lo * std::pow(hi / lo, i / 200.0);
             double v = paCallDelta(forward, k, sv);
             if (v > peakVal) {
                 peakVal = v;
                 peak = k;
+                peakIdx = i;
+            }
+        }
+        // The coarse 200-point grid always slightly under-estimates the true
+        // continuous maximum. Refine with a golden-section search around the
+        // best grid sample so deltas legitimately attainable at the edge of
+        // range aren't wrongly rejected as "unattainable".
+        {
+            double glo = lo * std::pow(hi / lo, std::max(0, peakIdx - 1) / 200.0);
+            double ghi = lo * std::pow(hi / lo, std::min(200, peakIdx + 1) / 200.0);
+            const double gr = (std::sqrt(5.0) - 1) / 2;
+            double a = glo, b = ghi;
+            double c = b - gr * (b - a);
+            double d = a + gr * (b - a);
+            double fc = paCallDelta(forward, c, sv);
+            double fd = paCallDelta(forward, d, sv);
+            for (int i = 0; i < 60; i++) {
+                if (fc > fd) {
+                    b = d;
+                    d = c;
+                    fd = fc;
+                    c = b - gr * (b - a);
+                    fc = paCallDelta(forward, c, sv);
+                } else {
+                    a = c;
+                    c = d;
+                    fc = fd;
+                    d = a + gr * (b - a);
+                    fd = paCallDelta(forward, d, sv);
+                }
+            }
+            double refinedK = 0.5 * (a + b);
+            double refinedVal = paCallDelta(forward, refinedK, sv);
+            if (refinedVal > peakVal) {
+                peakVal = refinedVal;
+                peak = refinedK;
             }
         }
         if (delta > peakVal) {

@@ -72,6 +72,18 @@ TEST(hftSorLimitPriceExcludesVenuesBeyondIt) {
     EXPECT_TRUE(out[1] == 0);
 }
 
+TEST(hftSorNanFeeVenueIsExcludedRatherThanPoisoningSelection) {
+    HftSor sor(2);
+    sor.venueQuote(0, 0, 0, 10000, 500);   // best raw price, but NaN fee
+    sor.venueQuote(1, 0, 0, 10005, 500);   // worse raw price, clean fee
+    sor.fee(0, std::numeric_limits<double>::quiet_NaN());
+    sor.fee(1, 0.0);
+    std::vector<std::int64_t> out(2);
+    sor.route(Side::BUY, 400, std::numeric_limits<std::int32_t>::max(), out.data());
+    EXPECT_TRUE(out[1] == 400);  // venue 0's NaN fee must not poison selection
+    EXPECT_TRUE(out[0] == 0);
+}
+
 TEST(hftSorEmptyBooksRouteNothing) {
     HftSor sor(2);
     std::vector<std::int64_t> out(2);
@@ -129,6 +141,49 @@ TEST(sorPreferDarkRoutesDarkFirstEvenWhenLitCompetitive) {
     EXPECT_TRUE(plan.legs.front().venue == "DARK");
     EXPECT_TRUE(plan.legs.front().quantity == 300);
     EXPECT_TRUE(plan.legs[1].venue == "LIT");
+}
+
+TEST(sorExcludesNanFeeVenueInsteadOfPoisoningAllInPrice) {
+    std::vector<VenueQuote> venues = {
+            VenueQuote{"CHEAP_NAN", 0, 0, 100.00, 500, std::numeric_limits<double>::quiet_NaN(), 1, false},
+            VenueQuote{"CLEAN", 0, 0, 100.05, 500, 0.0, 1, false}};
+    smart_order_router::RoutingPlan plan =
+            smart_order_router::route(Side::BUY, 400, venues, false);
+    EXPECT_TRUE(plan.legs.size() == 1);
+    EXPECT_TRUE(plan.legs[0].venue == "CLEAN");
+    EXPECT_TRUE(plan.legs[0].quantity == 400);
+}
+
+TEST(sorRejectsNegativeQuantity) {
+    EXPECT_THROWS(smart_order_router::route(Side::BUY, -1, smartOrderRouterVenues(), false));
+}
+
+TEST(sorRespectsLimitPriceExcludingBestVenue) {
+    std::vector<VenueQuote> venues = {
+            VenueQuote{"CHEAP_BUT_ABOVE_LIMIT", 0, 0, 100.00, 500, 0.0, 1, false},
+            VenueQuote{"COMPLIANT", 0, 0, 100.10, 500, 0.0, 1, false}};
+    smart_order_router::RoutingPlan plan =
+            smart_order_router::route(Side::BUY, 300, venues, false, 100.05);
+    EXPECT_TRUE(plan.legs.size() == 1);
+    EXPECT_TRUE(plan.legs[0].venue == "COMPLIANT");
+}
+
+TEST(sorReportsShortfallWhenLimitPriceExcludesAllVenues) {
+    std::vector<VenueQuote> venues = smartOrderRouterVenues();
+    smart_order_router::RoutingPlan plan =
+            smart_order_router::route(Side::BUY, 500, venues, false, 100.00);
+    EXPECT_TRUE(plan.legs.empty());
+    EXPECT_TRUE(plan.unroutedQty == 500);
+}
+
+TEST(sorExcludesStaleQuoteEvenWithBestPrice) {
+    std::vector<VenueQuote> venues = {
+            VenueQuote{"STALE_BEST", 0, 0, 100.00, 500, 0.0, 1, false, 1000},
+            VenueQuote{"FRESH", 0, 0, 100.05, 500, 0.0, 1, false, 9000}};
+    smart_order_router::RoutingPlan plan = smart_order_router::route(
+            Side::BUY, 300, venues, false, std::numeric_limits<double>::infinity(), 10000, 2000);
+    EXPECT_TRUE(plan.legs.size() == 1);
+    EXPECT_TRUE(plan.legs[0].venue == "FRESH");
 }
 
 // -------------------------------------------------------------- MidPegTracker

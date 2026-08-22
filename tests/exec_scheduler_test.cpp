@@ -78,6 +78,21 @@ TEST(proportionalAllocationHandlesRounding) {
     }
 }
 
+TEST(allocateProportionallyRejectsNaNWeightInsteadOfSilentUniformSplit) {
+    std::vector<double> w = {1, std::numeric_limits<double>::quiet_NaN(), 1};
+    EXPECT_THROWS(vwap_scheduler::allocateProportionally(100, w));
+}
+
+TEST(allocateProportionallyRejectsInfiniteWeightInsteadOfSilentUniformSplit) {
+    std::vector<double> w = {1, std::numeric_limits<double>::infinity(), 1};
+    EXPECT_THROWS(vwap_scheduler::allocateProportionally(100, w));
+}
+
+TEST(vwapScheduleRejectsNaNInVolumeProfile) {
+    std::vector<double> profile = {1, std::numeric_limits<double>::quiet_NaN(), 1};
+    EXPECT_THROWS(vwap_scheduler::schedule(1000, profile, 20000));
+}
+
 // --------------------------------------------------------------------- POV
 
 TEST(povChasesTargetParticipation) {
