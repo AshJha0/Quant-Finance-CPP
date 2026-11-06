@@ -231,6 +231,20 @@ public:
     /** Quantity filled so far on the order; -1 if it is not in the table. */
     std::int64_t filledQuantity(std::int64_t clOrdId) const;
 
+    /**
+     * Sets the first order id, before any order is submitted. ClOrdIDs must
+     * not repeat across restarts of a session, so a live deployment passes
+     * the persisted nextOrderId() of the previous run, or a value derived
+     * from the trading day. The default of 1 suits tests and simulation only.
+     *
+     * @throws std::logic_error if an order was already submitted
+     * @throws std::invalid_argument if first is outside the id range
+     */
+    void startOrderIdsAt(std::int64_t first);
+
+    /** The id the next order will take; persist it to restart without reuse. */
+    std::int64_t nextOrderId() const;
+
     /** Whether this gateway could have issued the ClOrdID, finished orders included. */
     bool issued(std::int64_t clOrdId) const;
 
@@ -333,6 +347,7 @@ private:
     std::atomic<std::int64_t> lastHeartbeat_{0};
     std::uint64_t sweptEpoch_ = 0;   // the polling thread only
     std::int64_t nextId_ = 1;        // under lock_
+    std::int64_t firstId_ = 1;       // under lock_
 
     std::atomic<int> live_{0};
     std::atomic<std::int64_t> delivered_{0};

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <limits>
+#include <stdexcept>
 
 #if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
 #include <immintrin.h>
@@ -509,13 +510,30 @@ std::int64_t HftOrderGateway::filledQuantity(std::int64_t clOrdId) const {
     return slot == nullptr ? -1 : slot->filled;
 }
 
+void HftOrderGateway::startOrderIdsAt(std::int64_t first) {
+    SpinGuard guard(lock_);
+    if (nextId_ != firstId_) {
+        throw std::logic_error("order ids cannot move after the first submit");
+    }
+    if (first <= 0 || first + slotMask_ >= kOrderIdMask) {
+        throw std::invalid_argument("first order id out of range");
+    }
+    nextId_ = first;
+    firstId_ = first;
+}
+
+std::int64_t HftOrderGateway::nextOrderId() const {
+    SpinGuard guard(lock_);
+    return nextId_;
+}
+
 bool HftOrderGateway::issued(std::int64_t clOrdId) const {
     SpinGuard guard(lock_);
     if (clOrdId <= 0) {
         return false;
     }
     std::int64_t orderId = clOrdId & kOrderIdMask;
-    if (orderId == 0 || orderId >= nextId_) {
+    if (orderId < firstId_ || orderId >= nextId_) {
         return false;
     }
     const Slot& slot = slots_[static_cast<std::size_t>(orderId & slotMask_)];
