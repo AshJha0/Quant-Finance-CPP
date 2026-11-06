@@ -44,7 +44,7 @@ VarBacktestResult test(const std::vector<double>& returns,
     if (returns.size() != varForecasts.size() || returns.size() < 20) {
         throw std::invalid_argument("need >= 20 aligned returns/forecasts");
     }
-    if (confidence <= 0 || confidence >= 1) {
+    if (!(confidence > 0) || confidence >= 1) {
         throw std::invalid_argument("confidence must be in (0,1)");
     }
     int n = static_cast<int>(returns.size());

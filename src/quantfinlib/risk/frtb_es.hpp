@@ -1,8 +1,8 @@
 // Port of com.quantfinlib.risk.FrtbEs (Java): FRTB Internal Models
 // Approach expected shortfall — ES at 97.5%, the liquidity-horizon
 // cascade ES = sqrt(sum_j [ES_j * sqrt((LH_j - LH_{j-1})/10)]^2) per
-// MAR33.5, the stressed-calibration multiplier (MAR33.6, ratio FLOORED
-// at 1 — a calm stressed period never discounts capital), and the Basel
+// MAR33.4, the stressed calibration ES = ES_R,S * max(1, ES_F,C / ES_R,C)
+// (MAR33.5-33.6), and the Basel
 // backtesting traffic light (GREEN <= 4, AMBER 5-9, RED >= 10 over 250
 // days). Styled after BCBS MAR33, not certified.
 #pragma once
@@ -19,7 +19,11 @@ inline constexpr int LH_40 = 40;
 inline constexpr int LH_60 = 60;
 inline constexpr int LH_120 = 120;
 
-/** ES at 97.5% of a loss sample (positive losses), the FRTB tail measure. */
+/**
+ * ES at 97.5% of a loss sample (positive losses), the FRTB tail measure, by
+ * the Acerbi-Tasche estimator of tail_risk, floored at zero. On 250 days the
+ * tail holds 6.25 observations: the worst six plus a quarter of the seventh.
+ */
 double es975(const std::vector<double>& losses);
 
 /**
@@ -33,9 +37,15 @@ double es975(const std::vector<double>& losses);
 double liquidityHorizonEs(const std::vector<double>& esByHorizon,
                           const std::vector<int>& horizons);
 
+/** Minimum share of full-set current ES the reduced set must explain (MAR33.5(2)). */
+inline constexpr double MIN_REDUCED_SET_COVERAGE = 0.75;
+
 /**
- * The stressed-calibration multiplier (MAR33.6): current full-factor ES
- * scaled by the reduced-set stressed/current ratio, FLOORED at 1.
+ * Stressed calibration: ES = ES_R,S * max(1, ES_F,C / ES_R,C). The stressed
+ * reduced-set ES is the base; the full/reduced ratio measured today scales it
+ * up for factors the stress period does not cover. Example: ES_F,C = 100,
+ * ES_R,C = 80, ES_R,S = 150 gives 187.5. Throws on negative or non-finite
+ * input and when ES_R,C < 0.75 * ES_F,C.
  */
 double stressCalibratedEs(double esCurrentFull, double esStressedReduced,
                           double esCurrentReduced);

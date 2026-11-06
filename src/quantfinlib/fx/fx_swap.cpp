@@ -16,7 +16,7 @@ FxSwap::FxSwap(CurrencyPair pair, double baseNotional, LocalDate nearDate, doubl
     if (!farDate_.isAfter(nearDate_)) {
         throw std::invalid_argument("far date must be after near date");
     }
-    if (nearRate_ <= 0 || farRate_ <= 0 || baseNotional_ == 0) {
+    if (!(nearRate_ > 0) || !(farRate_ > 0) || baseNotional_ == 0) {
         throw std::invalid_argument("rates must be > 0 and notional non-zero");
     }
 }

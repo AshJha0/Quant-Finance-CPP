@@ -18,6 +18,16 @@ double intrinsicDelta(OptionType type, double spot, double strike) {
     return spot < strike ? -1 : 0;
 }
 
+// Zero-vol limit of N(w*d): 1 in the money forward, 0 out, 1/2 exactly at it.
+double zeroVolProb(int w, double spot, double strike, double rate, double carry,
+                   double timeYears) {
+    double fwd = spot * std::exp((rate - carry) * timeYears);
+    if (fwd == strike) {
+        return 0.5;
+    }
+    return w * (fwd - strike) > 0 ? 1 : 0;
+}
+
 double d1(double spot, double strike, double rate, double carry,
           double vol, double timeYears) {
     return (std::log(spot / strike) + (rate - carry + 0.5 * vol * vol) * timeYears)
@@ -54,6 +64,11 @@ double delta(OptionType type, double spot, double strike,
     if (timeYears <= 0) {
         return intrinsicDelta(type, spot, strike);
     }
+    if (vol <= 0) {
+        int w = sign(type);
+        return std::exp(-carry * timeYears) * w
+                * zeroVolProb(w, spot, strike, rate, carry, timeYears);
+    }
     double d1v = d1(spot, strike, rate, carry, vol, timeYears);
     double cf = std::exp(-carry * timeYears);
     return type == OptionType::CALL
@@ -66,6 +81,9 @@ double gamma(double spot, double strike, double rate, double carry,
     if (timeYears <= 0) {
         return 0;
     }
+    if (vol <= 0) {
+        return 0;  // zero away from the forward; a Dirac mass at F = K, reported as 0
+    }
     double d1v = d1(spot, strike, rate, carry, vol, timeYears);
     return std::exp(-carry * timeYears) * math_utils::normPdf(d1v)
             / (spot * vol * std::sqrt(timeYears));
@@ -76,6 +94,13 @@ double vega(double spot, double strike, double rate, double carry,
     if (timeYears <= 0) {
         return 0;
     }
+    if (vol <= 0) {
+        // Limit as vol -> 0: zero unless the option is exactly at the forward.
+        return spot * std::exp((rate - carry) * timeYears) == strike
+                ? spot * std::exp(-carry * timeYears) * math_utils::normPdf(0)
+                        * std::sqrt(timeYears)
+                : 0;
+    }
     double d1v = d1(spot, strike, rate, carry, vol, timeYears);
     return spot * std::exp(-carry * timeYears) * math_utils::normPdf(d1v)
             * std::sqrt(timeYears);
@@ -85,6 +110,13 @@ double theta(OptionType type, double spot, double strike,
              double rate, double carry, double vol, double timeYears) {
     if (timeYears <= 0) {
         return 0;
+    }
+    if (vol <= 0) {
+        // Derivative of the deterministic price w*(S e^{-qT} - K e^{-rT})^+.
+        int w = sign(type);
+        double p = zeroVolProb(w, spot, strike, rate, carry, timeYears);
+        return w * p * (carry * spot * std::exp(-carry * timeYears)
+                        - rate * strike * std::exp(-rate * timeYears));
     }
     double sqrtT = std::sqrt(timeYears);
     double d1v = d1(spot, strike, rate, carry, vol, timeYears);
@@ -104,6 +136,11 @@ double rho(OptionType type, double spot, double strike,
            double rate, double carry, double vol, double timeYears) {
     if (timeYears <= 0) {
         return 0;
+    }
+    if (vol <= 0) {
+        int w = sign(type);
+        return w * strike * timeYears * std::exp(-rate * timeYears)
+                * zeroVolProb(w, spot, strike, rate, carry, timeYears);
     }
     double d2 = d1(spot, strike, rate, carry, vol, timeYears) - vol * std::sqrt(timeYears);
     double df = std::exp(-rate * timeYears);
@@ -127,8 +164,9 @@ double impliedVol(OptionType type, double marketPrice, double spot,
                   double strike, double rate, double carry, double timeYears) {
     double lo = 1e-4;
     double hi = 5.0;
-    if (marketPrice < price(type, spot, strike, rate, carry, lo, timeYears)
-            || marketPrice > price(type, spot, strike, rate, carry, hi, timeYears)) {
+    // Negated so a NaN price or input falls out here, not through the bisection.
+    if (!(marketPrice >= price(type, spot, strike, rate, carry, lo, timeYears))
+            || !(marketPrice <= price(type, spot, strike, rate, carry, hi, timeYears))) {
         return std::numeric_limits<double>::quiet_NaN();
     }
     for (int i = 0; i < 200; i++) {

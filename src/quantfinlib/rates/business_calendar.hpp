@@ -4,6 +4,7 @@
 // calendar is the union of two holiday sets — the FX settlement rule.
 #pragma once
 
+#include <cstdint>
 #include <set>
 #include <vector>
 
@@ -15,6 +16,9 @@ class BusinessCalendar {
 public:
     /** Date roll conventions for payment dates landing on non-business days. */
     enum class Roll { NONE, FOLLOWING, MODIFIED_FOLLOWING, PRECEDING };
+
+    /** Where an irregular period goes when the term is not whole periods. */
+    enum class StubType { SHORT_FRONT, LONG_FRONT, SHORT_BACK, LONG_BACK };
 
     static BusinessCalendar weekendsOnly() { return BusinessCalendar({}); }
 
@@ -47,10 +51,32 @@ public:
     std::vector<LocalDate> schedule(const LocalDate& effectiveDate, const LocalDate& maturity,
                                     int paymentsPerYear, Roll convention) const;
 
-    /** The unadjusted (theoretical) coupon dates strictly after effectiveDate. */
+    /** As schedule above with a stub type and the end-of-month rule. */
+    std::vector<LocalDate> schedule(const LocalDate& effectiveDate, const LocalDate& maturity,
+                                    int paymentsPerYear, Roll convention, StubType stub,
+                                    bool endOfMonth) const;
+
+    /** The unadjusted coupon dates strictly after effectiveDate: short front stub, no EOM. */
     static std::vector<LocalDate> unadjustedSchedule(const LocalDate& effectiveDate,
                                                      const LocalDate& maturity,
                                                      int paymentsPerYear);
+
+    /**
+     * Unadjusted period end dates strictly after effectiveDate, ascending, the
+     * last being maturity. Every date is anchor +- k*months from the fixed
+     * anchor (maturity for front stubs, effectiveDate for back stubs), never a
+     * step from the previous date: plusMonths clamps the day, and stepping
+     * would carry a clamp forward (31 Aug, 28 Feb, then 28 Aug). With
+     * endOfMonth and an anchor on its month's last day, every date is the last
+     * day of its month.
+     */
+    static std::vector<LocalDate> unadjustedSchedule(const LocalDate& effectiveDate,
+                                                     const LocalDate& maturity,
+                                                     int paymentsPerYear, StubType stub,
+                                                     bool endOfMonth);
+
+    /** anchor shifted by months; see the end-of-month rule above. */
+    static LocalDate shiftMonths(const LocalDate& anchor, std::int64_t months, bool endOfMonth);
 
 private:
     explicit BusinessCalendar(std::set<LocalDate> holidays) : holidays_(std::move(holidays)) {}

@@ -184,15 +184,11 @@ TEST(barrier_priceMatchesMonteCarlo) {
     EXPECT_NEAR(mc, closed, 0.002);
 }
 
-TEST(barrier_reverseAndBreachedBarriersAreRejected) {
-    // Breached down barrier.
+TEST(barrier_breachedBarriersAreRejected) {
+    // The named helpers reject a breached barrier. Reverse barriers (H > K on
+    // a down call) are now priced: see golden_allEightBarriersAgainstQuantLib.
     EXPECT_THROWS(bar::downAndOutCall(S, 1.10, 1.09, R, Q, VOL, T));
-    // Reverse: H > K on a call.
-    EXPECT_THROWS(bar::downAndOutCall(1.20, 1.02, 1.05, R, Q, VOL, T));
-    // Breached up barrier.
     EXPECT_THROWS(bar::upAndOutPut(S, 1.08, 1.05, R, Q, VOL, T));
-    // Reverse: H < K on a put.
-    EXPECT_THROWS(bar::upAndOutPut(1.00, 1.15, 1.10, R, Q, VOL, T));
 }
 
 QTEST_MAIN()

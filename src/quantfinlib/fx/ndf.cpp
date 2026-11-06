@@ -29,7 +29,7 @@ Ndf::Ndf(CurrencyPair pair, double baseNotional, double contractRate,
       contractRate_(contractRate),
       fixingDate_(fixingDate),
       settlementDate_(settlementDate) {
-    if (contractRate_ <= 0 || baseNotional_ == 0) {
+    if (!(contractRate_ > 0) || baseNotional_ == 0) {
         throw std::invalid_argument("contractRate must be > 0 and notional non-zero");
     }
     if (!fixingDate_.isBefore(settlementDate_)) {
@@ -57,7 +57,7 @@ Ndf Ndf::of(CurrencyPair pair, double baseNotional, double contractRate,
 }
 
 double Ndf::settlementAmount(double fixingRate) const {
-    if (fixingRate <= 0) {
+    if (!(fixingRate > 0)) {
         throw std::invalid_argument("fixingRate must be > 0: " + std::to_string(fixingRate));
     }
     return baseNotional_ * (fixingRate - contractRate_) / fixingRate;

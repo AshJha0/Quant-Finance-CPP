@@ -1,8 +1,8 @@
 // Port of com.quantfinlib.util.MathUtils (Java): numerical primitives
 // shared across the library. All functions are allocation-light and the
-// numeric algorithms (two-pass variance, Acklam normInv, Lanczos logGamma,
-// Lentz beta continued fraction, median-of-three pairSort) are copied 1:1
-// from the Java source, coefficients included. IllegalArgumentException
+// numeric algorithms (two-pass variance, Cody normCdf, Halley-refined Acklam
+// normInv, Lanczos logGamma, Lentz beta continued fraction, median-of-three
+// pairSort) follow the Java source, coefficients included. IllegalArgumentException
 // maps to std::invalid_argument.
 #pragma once
 
@@ -49,13 +49,24 @@ double correlation(const std::vector<double>& a, const std::vector<double>& b);
 
 /**
  * Cholesky decomposition: returns lower-triangular L with A = L * L'.
- * Adds tiny diagonal jitter if the matrix is BORDERLINE non-PSD, but a
- * pivot grossly negative relative to the diagonal scale (below
- * -1e-8 * maxDiag) means the input is genuinely indefinite and throws.
+ * Accepts positive semi-definite input: a zero or borderline pivot gets
+ * jitter of 1e-12 * maxDiag, relative so that small-unit covariances are not
+ * distorted. A pivot below -1e-8 * maxDiag means the input is indefinite and
+ * throws, as do non-square and non-finite input.
  */
 Matrix cholesky(const Matrix& a);
 
-/** Inverse standard normal CDF (Acklam's approximation, |error| < 1.15e-9). */
+/**
+ * The strict form, for callers that need a full-rank factor: any pivot at or
+ * below 1e-12 * maxDiag throws. Same factorisation and scale as cholesky.
+ */
+Matrix choleskyStrict(const Matrix& a);
+
+/**
+ * Inverse standard normal CDF: Acklam's approximation refined by one Halley
+ * step on normCdf, accurate to the last few bits of a double. Throws unless
+ * p is in (0, 1).
+ */
 double normInv(double p);
 
 /** Population skewness: m3 / m2^1.5. */
@@ -74,8 +85,21 @@ void pairSort(std::vector<double>& keys, std::vector<int>& values);
 /** Standard normal density. */
 double normPdf(double x);
 
-/** Standard normal CDF (Abramowitz & Stegun 26.2.17, |error| < 7.5e-8). */
+/**
+ * Standard normal CDF to full double precision: W. J. Cody's rational
+ * Chebyshev approximations (Math. Comp. 23, 1969; coefficients from SPECFUN
+ * ANORM, the set R's pnorm uses). The lower tail keeps about 1e-15 relative
+ * accuracy down to x = -37.5; beyond that the value is subnormal, then 0.
+ * NaN in gives NaN out.
+ */
 double normCdf(double x);
+
+/**
+ * exp(a) * normCdf(x) without the inf * 0 = NaN of the direct product, for
+ * reflection-principle formulas where exp(a) overflows as normCdf(x)
+ * underflows. Needs a <= x^2/2 for the result to be finite when x < -37.
+ */
+double expTimesNormCdf(double a, double x);
 
 /**
  * Solves A x = b by Gaussian elimination with partial pivoting.

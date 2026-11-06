@@ -13,7 +13,7 @@ YieldCurve YieldCurve::ofZeroRates(const std::vector<double>& tenorYears,
     }
     YieldCurve c;
     for (std::size_t i = 0; i < tenorYears.size(); i++) {
-        if (tenorYears[i] <= 0) {
+        if (!(tenorYears[i] > 0)) {
             throw std::invalid_argument("tenor must be positive: "
                                         + std::to_string(tenorYears[i]));
         }
