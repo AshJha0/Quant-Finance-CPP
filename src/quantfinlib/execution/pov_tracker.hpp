@@ -33,14 +33,21 @@ public:
     /** A market trade print that was NOT our fill. */
     void onMarketVolume(std::int64_t qty);
 
-    /** Our own child fill (do not also feed it to onMarketVolume). */
+    /** Our own child fill (do not also feed it to onMarketVolume); releases working quantity. */
     void onExecuted(std::int64_t qty);
+
+    /** A child order went out. Throws if it would overfill the parent. */
+    void onSent(std::int64_t qty);
+
+    /** Working quantity came back unfilled. */
+    void onCancelled(std::int64_t qty);
 
     /**
      * Shares to send now to restore the target participation: the behind-
-     * schedule quantity, clamped to the slice bounds and the parent
-     * remainder. Returns 0 while within minSlice of schedule (or when
-     * done) -- poll it on every print, act when it's positive.
+     * schedule quantity net of working orders, clamped to the slice bounds
+     * and the unsent remainder. Returns 0 while within minSlice of schedule
+     * (or when done) -- poll it on every print, act when it's positive. A
+     * tail smaller than minSlice goes out whole once the schedule reaches it.
      */
     std::int64_t dueQuantity() const;
 
@@ -49,6 +56,7 @@ public:
 
     std::int64_t executed() const { return executed_; }
     std::int64_t remaining() const { return parentQty_ - executed_; }
+    std::int64_t working() const { return working_; }
     std::int64_t marketVolume() const { return marketVolume_; }
     bool done() const { return executed_ >= parentQty_; }
 
@@ -60,6 +68,7 @@ private:
 
     std::int64_t marketVolume_ = 0;
     std::int64_t executed_ = 0;
+    std::int64_t working_ = 0;
 };
 
 }  // namespace quantfinlib

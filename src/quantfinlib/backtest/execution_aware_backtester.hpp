@@ -7,8 +7,15 @@
 // cost (TCA) is measurable per parent order.
 //
 // Semantics (long-only, single instrument, like Backtester):
+//  - config.fillTiming: by default a parent decided on bar t's close is
+//    first worked on bar t+1; SAME_BAR_CLOSE works it on the signal bar.
+//    A risk exit triggered inside a bar follows the same rule, because a
+//    model anchored to that bar's open would otherwise fill before the
+//    trigger happened. Use InstantExecution::from(config) to match.
+//  - Each bar's child requests are capped at
+//    config.maxParticipationRate of that bar's volume.
 //  - BUY signal while flat -> entry parent sized to available cash;
-//    worked from the signal bar until filled or superseded.
+//    worked until filled or superseded.
 //  - SELL signal -> cancels any unfilled entry remainder and works an
 //    exit parent for the whole position.
 //  - Stop-loss / take-profit are evaluated intrabar against the
@@ -67,6 +74,7 @@ private:
     void startExit(int i, const char* reason);
     void closeRoundTrip(int i);
     void forceClose(int last, std::vector<double>& equity);
+    std::int64_t volumeLimited(std::int64_t qty, int i) const;
 
     TradingStrategy& strategy_;
     const BarSeries& series_;
@@ -74,6 +82,8 @@ private:
     ExecutionModel& model_;
     double stopLossPct_;
     double takeProfitPct_;
+    bool sameBar_;
+    bool volumeKnown_;
 
     std::vector<Trade> trades_;
     // Parents are stored by value; entry_/exit_ index into parents_

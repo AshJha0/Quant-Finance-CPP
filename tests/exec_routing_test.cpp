@@ -53,6 +53,7 @@ TEST(hftSorFeesReorderVenuesAndRebatesAttract) {
     HftSor sor(2);
     sor.venueQuote(0, 0, 0, 10000, 500);
     sor.venueQuote(1, 0, 0, 10001, 500);
+    sor.allowTradeThrough(true);  // pure all-in ranking; the default guard is in execution_safety_test
     sor.fee(0, 3.0);   // 10_000 + 3 = 10_003 all-in
     sor.fee(1, -0.5);  // 10_001 - 0.5 = 10_000.5
     std::vector<std::int64_t> out(2);

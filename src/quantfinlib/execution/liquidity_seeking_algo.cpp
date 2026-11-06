@@ -53,14 +53,19 @@ std::int64_t LiquiditySeekingAlgo::dueQuantity(double scheduleFraction, const Be
     if (remaining <= 0) {
         return 0;
     }
+    if (std::isnan(scheduleFraction)) {
+        return 0;  // an unreadable clock releases nothing
+    }
     double f = math_utils::clamp(scheduleFraction, 0, 1);
 
     std::int64_t due = 0;
     if (isCheap(m, forecastSpread)) {
         double depth = m.displayedDepth;
-        due = depth == std::numeric_limits<double>::infinity()
-                ? remaining
-                : static_cast<std::int64_t>(std::floor(config_.maxDepthFraction * std::max(depth, 0.0)));
+        if (depth == std::numeric_limits<double>::infinity()) {
+            due = remaining;
+        } else if (depth > 0) {  // NaN depth: no burst
+            due = static_cast<std::int64_t>(std::floor(config_.maxDepthFraction * depth));
+        }
     }
 
     // The completion floor: from forceCompleteFrom, the remainder spread

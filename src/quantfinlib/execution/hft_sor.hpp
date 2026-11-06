@@ -7,6 +7,10 @@
 // Fees are expressed in ticks (venue taker fee converted at the
 // instrument's tick size, once, at configuration time), so the comparison
 // stays in integer-friendly arithmetic. Negative fee ticks model rebates.
+// Venues are swept in displayed-price order with fees breaking ties, so a
+// rebate cannot route through a better displayed quote;
+// allowTradeThrough(true) restores pure all-in ordering. A non-positive
+// price is never routed.
 // With the handful of venues real equities routing faces, the O(V^2)
 // selection sweep is faster than any heap -- and allocates nothing.
 //
@@ -27,6 +31,9 @@ public:
 
     /** Per-venue taker fee in ticks (negative = rebate). Configure once. */
     void fee(int venue, double takerFeeTicks);
+
+    /** True ranks purely by all-in price, even through a better displayed quote. */
+    void allowTradeThrough(bool allow) { allowTradeThrough_ = allow; }
 
     /** One venue's displayed top of book (zero size = side unavailable). */
     void venueQuote(int venue, std::int32_t bid, std::int64_t bidSz, std::int32_t ask, std::int64_t askSz);
@@ -65,6 +72,7 @@ private:
     std::vector<double> feeTicks_;
 
     std::int64_t routeCount_ = 0;
+    bool allowTradeThrough_ = false;
 };
 
 }  // namespace quantfinlib

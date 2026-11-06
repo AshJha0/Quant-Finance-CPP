@@ -48,11 +48,25 @@ void requirePositive(double x, const std::string& name) {
 
 }  // namespace
 
+CentralRiskBook::CentralRiskBook(std::string bookCurrency) : bookCurrency_(std::move(bookCurrency)) {
+    if (bookCurrency_.size() != 3) {
+        throw std::invalid_argument("book currency must be a 3-letter code");
+    }
+}
+
 void CentralRiskBook::add(const std::string& desk, const std::string& factor, double amount) {
     if (!std::isfinite(amount)) {
         throw std::invalid_argument("non-finite exposure for " + factor);
     }
-    int id = registry_.id(factor);
+    addDirect(desk, registry_.id(factor), amount);
+}
+
+void CentralRiskBook::put(Flow& flow, const std::string& factor, double amount) {
+    add(flow.desk, factor, amount);
+    flow.legs.push_back(Leg{registry_.id(factor), amount});
+}
+
+void CentralRiskBook::addDirect(const std::string& desk, int id, double amount) {
     if (id >= static_cast<int>(net_.size())) {
         std::size_t newSize = std::max(net_.size() * 2, static_cast<std::size_t>(id + 1));
         net_.resize(newSize, 0.0);
@@ -72,8 +86,31 @@ void CentralRiskBook::bookCashEquity(const std::string& desk, const std::string&
     requireDesk(desk);
     requireFinite(qty, "qty");
     requirePositive(price, "price");
-    add(desk, "EQ:" + symbol, qty * price);
+    Flow flow{FlowKind::CASH_EQUITY, desk, symbol};
+    flow.units = qty;
+    flow.entry = price;
+    flow.mark = price;
+    put(flow, "EQ:" + symbol, qty * price);
+    flows_.push_back(std::move(flow));
     flowsBooked_++;
+}
+
+void CentralRiskBook::equityOptionLegs(Flow& f) {
+    if (f.time <= 0) {
+        return;  // expired: value is intrinsic, no greeks left
+    }
+    double delta = black_scholes::delta(f.type, f.mark, f.strike, f.rate, f.carry, f.vol, f.time);
+    double gamma = black_scholes::gamma(f.mark, f.strike, f.rate, f.carry, f.vol, f.time);
+    double vega = black_scholes::vega(f.mark, f.strike, f.rate, f.carry, f.vol, f.time);
+    double deltaLeg = f.units * delta * f.mark;
+    double gammaLeg = f.units * gamma * f.mark * f.mark / 100;
+    double vegaLeg = f.units * vega / 100;
+    requireFinite(deltaLeg, "delta leg");
+    requireFinite(gammaLeg, "gamma leg");
+    requireFinite(vegaLeg, "vega leg");
+    put(f, "EQ:" + f.key, deltaLeg);
+    put(f, "EQGAMMA:" + f.key, gammaLeg);
+    put(f, "EQVEGA:" + f.key, vegaLeg);
 }
 
 void CentralRiskBook::bookEquityOption(const std::string& desk, const std::string& symbol,
@@ -89,19 +126,18 @@ void CentralRiskBook::bookEquityOption(const std::string& desk, const std::strin
     requirePositive(strike, "strike");
     requirePositive(vol, "vol");
     requirePositive(timeYears, "timeYears");
-    double units = contracts * multiplier;
-    double delta = black_scholes::delta(type, spot, strike, rate, carry, vol, timeYears);
-    double gamma = black_scholes::gamma(spot, strike, rate, carry, vol, timeYears);
-    double vega = black_scholes::vega(spot, strike, rate, carry, vol, timeYears);
-    double deltaLeg = units * delta * spot;
-    double gammaLeg = units * gamma * spot * spot / 100;
-    double vegaLeg = units * vega / 100;
-    requireFinite(deltaLeg, "delta leg");
-    requireFinite(gammaLeg, "gamma leg");
-    requireFinite(vegaLeg, "vega leg");
-    add(desk, "EQ:" + symbol, deltaLeg);
-    add(desk, "EQGAMMA:" + symbol, gammaLeg);
-    add(desk, "EQVEGA:" + symbol, vegaLeg);
+    Flow flow{FlowKind::EQUITY_OPTION, desk, symbol};
+    flow.type = type;
+    flow.units = contracts * multiplier;
+    flow.mark = spot;
+    flow.strike = strike;
+    flow.rate = rate;
+    flow.carry = carry;
+    flow.vol = vol;
+    flow.time = timeYears;
+    flow.entry = optionValue(flow);
+    equityOptionLegs(flow);
+    flows_.push_back(std::move(flow));
     flowsBooked_++;
 }
 
@@ -113,8 +149,14 @@ void CentralRiskBook::bookFxSpot(const std::string& desk, const std::string& pai
     requirePositive(rate, "rate");
     double quoteLeg = -baseNotional * rate;
     requireFinite(quoteLeg, "quote leg");
-    add(desk, "CCY:" + pair.substr(0, 3), baseNotional);
-    add(desk, "CCY:" + pair.substr(3, 3), quoteLeg);
+    Flow flow{FlowKind::FX_LINEAR, desk, pair};
+    flow.units = baseNotional;
+    flow.entry = rate;
+    flow.mark = rate;
+    put(flow, "CCY:" + pair.substr(0, 3), baseNotional);
+    put(flow, "CCY:" + pair.substr(3, 3), quoteLeg);
+    flows_.push_back(std::move(flow));
+    learnRate(pair, rate);
     flowsBooked_++;
 }
 
@@ -127,8 +169,12 @@ void CentralRiskBook::bookFxSwap(const std::string& desk, const std::string& pai
     requirePositive(farRate, "farRate");
     double quoteImbalance = baseNotional * (farRate - nearRate);
     requireFinite(quoteImbalance, "quote-leg imbalance");
-    add(desk, "CCY:" + pair.substr(3, 3), quoteImbalance);
-    add(desk, "FXPOINTS:" + pair, -baseNotional);
+    Flow flow{FlowKind::FX_SWAP, desk, pair};
+    flow.units = baseNotional;
+    put(flow, "CCY:" + pair.substr(3, 3), quoteImbalance);
+    put(flow, "FXPOINTS:" + pair, -baseNotional);
+    flows_.push_back(std::move(flow));
+    learnRate(pair, nearRate);
     flowsBooked_++;
 }
 
@@ -140,10 +186,37 @@ void CentralRiskBook::bookNdf(const std::string& desk, const std::string& pair,
     requirePositive(fwdRate, "fwdRate");
     double quoteLeg = -baseNotional * fwdRate;
     requireFinite(quoteLeg, "quote leg");
-    add(desk, "CCY:" + pair.substr(0, 3), baseNotional);
-    add(desk, "CCY:" + pair.substr(3, 3), quoteLeg);
+    Flow flow{FlowKind::FX_LINEAR, desk, pair};
+    flow.units = baseNotional;
+    flow.entry = fwdRate;
+    flow.mark = fwdRate;
+    put(flow, "CCY:" + pair.substr(0, 3), baseNotional);
+    put(flow, "CCY:" + pair.substr(3, 3), quoteLeg);
+    flows_.push_back(std::move(flow));
     pendingFixings_[pair] += std::fabs(baseNotional);
+    learnRate(pair, fwdRate);
     flowsBooked_++;
+}
+
+void CentralRiskBook::fxOptionLegs(Flow& f) {
+    if (f.time <= 0) {
+        return;
+    }
+    double delta = black_scholes::delta(f.type, f.mark, f.strike, f.rate, f.carry, f.vol, f.time);
+    double gamma = black_scholes::gamma(f.mark, f.strike, f.rate, f.carry, f.vol, f.time);
+    double vega = black_scholes::vega(f.mark, f.strike, f.rate, f.carry, f.vol, f.time);
+    double deltaBase = f.units * delta;
+    double quoteLeg = -deltaBase * f.mark;
+    double gammaLeg = f.units * gamma * f.mark * f.mark / 100;
+    double vegaLeg = f.units * vega / 100;
+    requireFinite(deltaBase, "delta leg");
+    requireFinite(quoteLeg, "quote leg");
+    requireFinite(gammaLeg, "gamma leg");
+    requireFinite(vegaLeg, "vega leg");
+    put(f, "CCY:" + f.key.substr(0, 3), deltaBase);
+    put(f, "CCY:" + f.key.substr(3, 3), quoteLeg);
+    put(f, "FXGAMMA:" + f.key, gammaLeg);
+    put(f, "FXVEGA:" + f.key, vegaLeg);
 }
 
 void CentralRiskBook::bookFxOption(const std::string& desk, const std::string& pair,
@@ -159,25 +232,181 @@ void CentralRiskBook::bookFxOption(const std::string& desk, const std::string& p
     requirePositive(strike, "strike");
     requirePositive(vol, "vol");
     requirePositive(timeYears, "timeYears");
-    double delta = black_scholes::delta(type, spotRate, strike, domesticRate, foreignRate, vol,
-                                        timeYears);
-    double gamma = black_scholes::gamma(spotRate, strike, domesticRate, foreignRate, vol,
-                                        timeYears);
-    double vega = black_scholes::vega(spotRate, strike, domesticRate, foreignRate, vol,
-                                      timeYears);
-    double deltaBase = baseNotional * delta;
-    double quoteLeg = -deltaBase * spotRate;
-    double gammaLeg = baseNotional * gamma * spotRate * spotRate / 100;
-    double vegaLeg = baseNotional * vega / 100;
-    requireFinite(deltaBase, "delta leg");
-    requireFinite(quoteLeg, "quote leg");
-    requireFinite(gammaLeg, "gamma leg");
-    requireFinite(vegaLeg, "vega leg");
-    add(desk, "CCY:" + pair.substr(0, 3), deltaBase);
-    add(desk, "CCY:" + pair.substr(3, 3), quoteLeg);
-    add(desk, "FXGAMMA:" + pair, gammaLeg);
-    add(desk, "FXVEGA:" + pair, vegaLeg);
+    Flow flow{FlowKind::FX_OPTION, desk, pair};
+    flow.type = type;
+    flow.units = baseNotional;
+    flow.mark = spotRate;
+    flow.strike = strike;
+    flow.rate = domesticRate;
+    flow.carry = foreignRate;
+    flow.vol = vol;
+    flow.time = timeYears;
+    flow.entry = optionValue(flow);
+    fxOptionLegs(flow);
+    flows_.push_back(std::move(flow));
+    learnRate(pair, spotRate);
     flowsBooked_++;
+}
+
+double CentralRiskBook::optionValue(const Flow& f) {
+    if (f.time <= 0) {
+        double intrinsic = f.type == OptionType::CALL ? f.mark - f.strike : f.strike - f.mark;
+        return std::max(0.0, intrinsic);
+    }
+    return black_scholes::price(f.type, f.mark, f.strike, f.rate, f.carry, f.vol, f.time);
+}
+
+void CentralRiskBook::remark(Flow& f, double mark, double vol, double yearsElapsed) {
+    for (const Leg& leg : f.legs) {
+        auto id = static_cast<std::size_t>(leg.factor);
+        net_[id] -= leg.amount;
+        gross_[id] -= std::fabs(leg.amount);
+        deskNet_[f.desk][id] -= leg.amount;
+    }
+    std::vector<Leg> old = std::move(f.legs);
+    f.legs.clear();
+    f.mark = mark;
+    if (!std::isnan(vol)) {
+        f.vol = vol;
+    }
+    f.time -= yearsElapsed;
+    switch (f.kind) {
+        case FlowKind::CASH_EQUITY:
+            put(f, "EQ:" + f.key, f.units * mark);
+            break;
+        case FlowKind::EQUITY_OPTION:
+            equityOptionLegs(f);
+            break;
+        case FlowKind::FX_OPTION:
+            fxOptionLegs(f);
+            break;
+        case FlowKind::FX_LINEAR:
+        case FlowKind::FX_SWAP:
+            // Currency legs are contractual amounts: a new rate changes
+            // their value, not their size.
+            for (const Leg& leg : old) {
+                addDirect(f.desk, leg.factor, leg.amount);
+            }
+            f.legs = std::move(old);
+            break;
+    }
+}
+
+void CentralRiskBook::remarkEquity(const std::string& symbol, double spot, double vol,
+                                   double yearsElapsed) {
+    requirePositive(spot, "spot");
+    if (!std::isnan(vol)) {
+        requirePositive(vol, "vol");
+    }
+    if (!(yearsElapsed >= 0) || !std::isfinite(yearsElapsed)) {
+        throw std::invalid_argument("yearsElapsed must be >= 0 and finite");
+    }
+    for (Flow& f : flows_) {
+        if (f.key == symbol && (f.kind == FlowKind::CASH_EQUITY || f.kind == FlowKind::EQUITY_OPTION)) {
+            remark(f, spot, vol, yearsElapsed);
+        }
+    }
+}
+
+void CentralRiskBook::remarkFx(const std::string& pair, double rate, double vol,
+                               double yearsElapsed) {
+    requirePair(pair);
+    requirePositive(rate, "rate");
+    if (!std::isnan(vol)) {
+        requirePositive(vol, "vol");
+    }
+    if (!(yearsElapsed >= 0) || !std::isfinite(yearsElapsed)) {
+        throw std::invalid_argument("yearsElapsed must be >= 0 and finite");
+    }
+    for (Flow& f : flows_) {
+        if (f.key == pair && f.kind != FlowKind::CASH_EQUITY && f.kind != FlowKind::EQUITY_OPTION) {
+            remark(f, rate, vol, yearsElapsed);
+        }
+    }
+    learnRate(pair, rate);
+}
+
+double CentralRiskBook::inventoryPnl() const {
+    double total = 0;
+    for (const Flow& f : flows_) {
+        switch (f.kind) {
+            case FlowKind::CASH_EQUITY:
+                total += f.units * (f.mark - f.entry);
+                break;
+            case FlowKind::EQUITY_OPTION:
+                total += f.units * (optionValue(f) - f.entry);
+                break;
+            case FlowKind::FX_LINEAR:
+                total += f.units * (f.mark - f.entry) * toBook(f.key.substr(3, 3));
+                break;
+            case FlowKind::FX_OPTION:
+                total += f.units * (optionValue(f) - f.entry) * toBook(f.key.substr(3, 3));
+                break;
+            case FlowKind::FX_SWAP:
+                break;
+        }
+    }
+    return total;
+}
+
+void CentralRiskBook::setFxRate(const std::string& currency, double bookPerUnit) {
+    if (currency.size() != 3) {
+        throw std::invalid_argument("currency must be a 3-letter code");
+    }
+    requirePositive(bookPerUnit, "bookPerUnit");
+    setRates_[currency] = bookPerUnit;
+}
+
+void CentralRiskBook::learnRate(const std::string& pair, double rate) {
+    std::string base = pair.substr(0, 3);
+    std::string quote = pair.substr(3, 3);
+    if (quote == bookCurrency_) {
+        learnedRates_[base] = rate;
+    } else if (base == bookCurrency_) {
+        learnedRates_[quote] = 1 / rate;
+    }
+}
+
+double CentralRiskBook::toBook(const std::string& currency) const {
+    if (currency == bookCurrency_) {
+        return 1;
+    }
+    auto set = setRates_.find(currency);
+    if (set != setRates_.end()) {
+        return set->second;
+    }
+    auto learned = learnedRates_.find(currency);
+    if (learned != learnedRates_.end()) {
+        return learned->second;
+    }
+    throw std::invalid_argument("no rate from " + currency + " to " + bookCurrency_
+                                + ": call setFxRate");
+}
+
+double CentralRiskBook::factorToBook(const std::string& factor) const {
+    if (factor.rfind("CCY:", 0) == 0) {
+        return toBook(factor.substr(4));
+    }
+    if (factor.rfind("FXPOINTS:", 0) == 0) {
+        return toBook(factor.substr(9, 3));  // measured in base currency
+    }
+    if (factor.rfind("FXGAMMA:", 0) == 0) {
+        return toBook(factor.substr(11));  // measured in quote currency
+    }
+    if (factor.rfind("FXVEGA:", 0) == 0) {
+        return toBook(factor.substr(10));
+    }
+    return 1;  // equity factors are booked in book currency
+}
+
+std::vector<double> CentralRiskBook::bookExposures() const {
+    std::vector<double> out = netExposures();
+    for (std::size_t i = 0; i < out.size(); i++) {
+        if (out[i] != 0) {
+            out[i] *= factorToBook(registry_.name(static_cast<int>(i)));
+        }
+    }
+    return out;
 }
 
 double CentralRiskBook::exposure(const std::string& factor) const {
@@ -213,8 +442,12 @@ double CentralRiskBook::nettingEfficiency() const {
     double sumNet = 0;
     double sumGross = 0;
     for (int i = 0; i < n; i++) {
-        sumNet += std::fabs(net_[i]);
-        sumGross += gross_[i];
+        if (gross_[i] == 0) {
+            continue;
+        }
+        double fx = factorToBook(registry_.name(i));
+        sumNet += std::fabs(net_[i]) * fx;
+        sumGross += gross_[i] * fx;
     }
     return sumGross <= 0 ? 0 : 1 - sumNet / sumGross;
 }
@@ -255,7 +488,7 @@ CentralRiskBook::CrbReport CentralRiskBook::report(
     if (static_cast<int>(covariance.size()) != n) {
         throw std::invalid_argument("covariance must be n x n over factors().name(i) in registry order");
     }
-    std::vector<double> netVec = netExposures();
+    std::vector<double> netVec = bookExposures();
     double bookVar = var_engine::deltaNormalVar(netVec, covariance, confidence);
     double bookEs = var_engine::deltaNormalEs(netVec, covariance, confidence);
     double standalone = 0;
@@ -264,7 +497,7 @@ CentralRiskBook::CrbReport CentralRiskBook::report(
         std::vector<double> full(n, 0.0);
         std::size_t copyLen = std::min(d.size(), full.size());
         for (std::size_t i = 0; i < copyLen; i++) {
-            full[i] = d[i];
+            full[i] = d[i] == 0 ? 0 : d[i] * factorToBook(registry_.name(static_cast<int>(i)));
         }
         standalone += var_engine::deltaNormalVar(full, covariance, confidence);
     }
@@ -272,8 +505,12 @@ CentralRiskBook::CrbReport CentralRiskBook::report(
     double sumGross = 0;
     int booked = std::min(n, static_cast<int>(net_.size()));
     for (int i = 0; i < booked; i++) {
-        sumNet += std::fabs(net_[i]);
-        sumGross += gross_[i];
+        if (gross_[i] == 0) {
+            continue;
+        }
+        double fx = factorToBook(registry_.name(i));
+        sumNet += std::fabs(net_[i]) * fx;
+        sumGross += gross_[i] * fx;
     }
     return {sumGross, sumNet, nettingEfficiency(), bookVar, bookEs, standalone,
            standalone - bookVar};

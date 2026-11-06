@@ -5,6 +5,8 @@
 #include <string>
 #include <vector>
 
+#include "quantfinlib/backtest/volume_cap.hpp"
+
 namespace quantfinlib {
 namespace backtester {
 
@@ -39,6 +41,7 @@ BacktestResult run(TradingStrategy& strategy, const BarSeries& series,
         throw std::invalid_argument("tradeFrom must be in [0, " + std::to_string(n)
                                     + "), got " + std::to_string(tradeFrom));
     }
+    volume_cap::requireRate(config.maxParticipationRate);
     strategy.init(series);
     std::vector<double> equity(static_cast<std::size_t>(n - tradeFrom), 0.0);
     std::vector<Trade> trades;
@@ -47,31 +50,75 @@ BacktestResult run(TradingStrategy& strategy, const BarSeries& series,
     double takeProfit =
             strategy.takeProfitPct() > 0 ? strategy.takeProfitPct() : config.takeProfitPct;
 
+    const bool sameBar = config.fillTiming == FillTiming::SAME_BAR_CLOSE;
+    const bool volumeKnown = volume_cap::hasVolumeData(series);
+
     double cash = config.initialCapital;
     double qty = 0;
     double entryPrice = 0;
     double entryCost = 0;
     int entryIndex = -1;
+    bool buyPending = false;
+    const char* exitPending = nullptr;  // reason of an exit still to be worked
+
+    auto enter = [&](int i, double fill) {
+        double fee = cash * config.commissionRate;
+        double wanted = (cash - fee) / fill;
+        double bought = std::min(
+                wanted, volume_cap::maxQuantity(series, i, config.maxParticipationRate, volumeKnown));
+        if (!(bought > 0)) {
+            return;
+        }
+        // All-in cash for `bought`: the whole balance unless the cap bit.
+        double spend = bought < wanted ? cash * (bought / wanted) : cash;
+        qty = bought;
+        entryPrice = fill;
+        entryCost = spend;
+        entryIndex = i;
+        cash -= spend;
+    };
+    auto sell = [&](int i, double fill, const char* reason) {
+        double sold = std::min(
+                qty, volume_cap::maxQuantity(series, i, config.maxParticipationRate, volumeKnown));
+        exitPending = reason;
+        if (!(sold > 0)) {
+            return;
+        }
+        double costShare = sold < qty ? entryCost * (sold / qty) : entryCost;
+        cash = closePosition(trades, series, config, sold, entryPrice, costShare, entryIndex, i,
+                             fill, reason, cash);
+        entryCost -= costShare;
+        qty = sold < qty ? qty - sold : 0;
+        if (qty == 0) {
+            exitPending = nullptr;
+        }
+    };
 
     for (int i = tradeFrom; i < n; i++) {
-        // 1. Intrabar risk exits (only on bars after the entry bar).
-        if (qty > 0 && i > entryIndex) {
+        // 0. Orders decided on an earlier bar reach the market at this open.
+        if (exitPending != nullptr) {
+            sell(i, series.open(i) * (1 - config.slippageRate), exitPending);
+        } else if (buyPending) {
+            enter(i, series.open(i) * (1 + config.slippageRate));
+        }
+        buyPending = false;
+
+        // 1. Intrabar risk exits. An entry at this bar's open is exposed to
+        //    the rest of the bar; an entry at a close is not, and cannot be
+        //    open yet at this step.
+        if (qty > 0 && exitPending == nullptr) {
             if (stopLoss > 0) {
                 double stopPrice = entryPrice * (1 - stopLoss);
                 if (series.low(i) <= stopPrice) {
                     double fill = std::min(stopPrice, series.open(i));
-                    cash = closePosition(trades, series, config, qty, entryPrice, entryCost,
-                                         entryIndex, i, fill, Trade::REASON_STOP_LOSS, cash);
-                    qty = 0;
+                    sell(i, fill * (1 - config.slippageRate), Trade::REASON_STOP_LOSS);
                 }
             }
-            if (qty > 0 && takeProfit > 0) {
+            if (qty > 0 && exitPending == nullptr && takeProfit > 0) {
                 double targetPrice = entryPrice * (1 + takeProfit);
                 if (series.high(i) >= targetPrice) {
                     double fill = std::max(targetPrice, series.open(i));
-                    cash = closePosition(trades, series, config, qty, entryPrice, entryCost,
-                                         entryIndex, i, fill, Trade::REASON_TAKE_PROFIT, cash);
-                    qty = 0;
+                    sell(i, fill, Trade::REASON_TAKE_PROFIT);
                 }
             }
         }
@@ -80,18 +127,18 @@ BacktestResult run(TradingStrategy& strategy, const BarSeries& series,
         Signal sig = strategy.onBar(i);
         double close = series.close(i);
         if (sig == Signal::BUY && qty == 0 && cash > 0) {
-            double fill = close * (1 + config.slippageRate);
-            double fee = cash * config.commissionRate;
-            qty = (cash - fee) / fill;
-            entryPrice = fill;
-            entryCost = cash;
-            entryIndex = i;
-            cash = 0;
-        } else if (sig == Signal::SELL && qty > 0) {
-            double fill = close * (1 - config.slippageRate);
-            cash = closePosition(trades, series, config, qty, entryPrice, entryCost,
-                                 entryIndex, i, fill, Trade::REASON_SIGNAL, cash);
-            qty = 0;
+            if (sameBar) {
+                double fill = close * (1 + config.slippageRate);
+                enter(i, fill);
+            } else {
+                buyPending = true;
+            }
+        } else if (sig == Signal::SELL && qty > 0 && exitPending == nullptr) {
+            if (sameBar) {
+                sell(i, close * (1 - config.slippageRate), Trade::REASON_SIGNAL);
+            } else {
+                exitPending = Trade::REASON_SIGNAL;
+            }
         }
 
         equity[static_cast<std::size_t>(i - tradeFrom)] = cash + qty * close;

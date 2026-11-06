@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <stdexcept>
 
 #include "quantfinlib/microstructure/queue_model.hpp"
@@ -56,6 +57,15 @@ struct Scored {
 
 AdaptiveSor::RoutingDecision AdaptiveSor::route(Side side, std::int64_t quantity,
                                                 const std::vector<VenueQuote>& venues) {
+    return route(side, quantity, venues, smart_order_router::marketLimit(side), 0,
+                 std::numeric_limits<std::int64_t>::max());
+}
+
+AdaptiveSor::RoutingDecision AdaptiveSor::route(Side side, std::int64_t quantity,
+                                                const std::vector<VenueQuote>& venues,
+                                                double limitPrice, std::int64_t nowNanos,
+                                                std::int64_t maxQuoteAgeNanos) {
+    smart_order_router::requireRouteArguments(limitPrice, maxQuoteAgeNanos);
     bool buy = side == Side::BUY;
     std::vector<smart_order_router::RouteLeg> lit;
     std::vector<smart_order_router::RouteLeg> probes;
@@ -63,18 +73,22 @@ AdaptiveSor::RoutingDecision AdaptiveSor::route(Side side, std::int64_t quantity
     candidates.reserve(venues.size());
 
     for (const VenueQuote& v : venues) {
+        if (smart_order_router::isStale(v, nowNanos, maxQuoteAgeNanos)) {
+            continue;
+        }
         auto idIt = venueIds_.find(v.venue);
         const int* id = idIt != venueIds_.end() ? &idIt->second : nullptr;
         if (v.dark) {
             std::int64_t probe = darkProbeSize(id, quantity);
-            if (probe > 0 && !std::isnan(v.mid())) {
+            if (probe > 0 && v.bid > 0 && v.ask > 0
+                && smart_order_router::isDealable(side, v.mid(), limitPrice)) {
                 probes.push_back(smart_order_router::RouteLeg{v.venue, v.mid(), probe, true});
             }
             continue;
         }
         double px = buy ? v.ask : v.bid;
         std::int64_t size = buy ? v.askSize : v.bidSize;
-        if (size <= 0 || std::isnan(px) || px <= 0) {
+        if (size <= 0 || !smart_order_router::isDealable(side, px, limitPrice)) {
             continue;
         }
         double fillRate = id != nullptr ? scorecard_.fillRate(*id) : scorecard_.fillRatePrior();
@@ -101,7 +115,12 @@ AdaptiveSor::RoutingDecision AdaptiveSor::route(Side side, std::int64_t quantity
         candidates.push_back(Scored{v.venue, px, expected, size});
     }
 
+    // Displayed price first, so no scorecard preference trades through a
+    // better quote; the expected cost ranks venues showing the same price.
     std::stable_sort(candidates.begin(), candidates.end(), [buy](const Scored& a, const Scored& b) {
+        if (a.price != b.price) {
+            return buy ? a.price < b.price : a.price > b.price;
+        }
         return buy ? a.expected < b.expected : a.expected > b.expected;
     });
 

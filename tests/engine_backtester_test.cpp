@@ -28,7 +28,7 @@ BarSeries crossSeries() {
 }
 
 BacktestConfig zeroCost() {
-    return BacktestConfig{100000, 0.0, 0.0, 0.0, 0.0, 252};
+    return BacktestConfig{100000, 0.0, 0.0, 0.0, 0.0, 252}.withSameBarCloseFill().withoutVolumeCap();
 }
 
 /** Emits BUY at one fixed bar and never sells (force-close exercises). */
@@ -75,7 +75,7 @@ TEST(commissionChargedOnBothEntryAndExitNotional) {
     SmaCrossStrategy strategy(2, 3);
     BarSeries series = crossSeries();
     BacktestResult result =
-            backtester::run(strategy, series, BacktestConfig::defaults());
+            backtester::run(strategy, series, zeroCost().withCommission(0.001));
 
     EXPECT_TRUE(result.trades().size() == 1);
     EXPECT_NEAR(result.trades()[0].quantity, 4995.0, 1e-9);

@@ -44,7 +44,9 @@ public:
      * pool semantics: the incoming order's MEQ is checked against the
      * total crossable contra quantity (an order wanting 100 fills against
      * two resting 60s), while each resting order's own MEQ still gates its
-     * individual slice.
+     * individual slice. MEQ guards the first execution: once an order has
+     * traded at least that much, its remainder rests with no minimum, or a
+     * tail smaller than the MEQ could never fill.
      */
     std::vector<Fill> submit(Side side, std::int64_t quantity, std::int64_t minExecutionQty);
 

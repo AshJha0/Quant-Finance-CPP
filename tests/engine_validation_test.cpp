@@ -21,7 +21,7 @@ namespace wfa = quantfinlib::walk_forward_analyzer;
 namespace {
 
 BacktestConfig zeroCost() {
-    return BacktestConfig{100000, 0.0, 0.0, 0.0, 0.0, 252};
+    return BacktestConfig{100000, 0.0, 0.0, 0.0, 0.0, 252}.withSameBarCloseFill().withoutVolumeCap();
 }
 
 /** Buys at the parameterized bar, holds to the end (force-closed). */
