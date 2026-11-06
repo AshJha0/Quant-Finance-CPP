@@ -1,218 +1,107 @@
 # Learning quantfinlib in C++
 
-This is the port-specific guide to the C++20 mirror of
+A guide to the C++20 library in this repository: how it is organised, a
+reading path through its packages, and experiments you can compile and
+run. It began as a port of
 [Quant-Finance-Library](https://github.com/AshJha0/Quant-Finance-Library)
-(the Java reference, v1.17.0). It does not try to replace the Java
-project's 26,000-line LEARN.md -- that document has 1000 worked
-exercises and stays the deep-material home for the whole family. This
-guide is the ~800-line version: how the C++ port is built, a reading
-path through the 178 headers that exist *in this repo today*, five
-hands-on experiments with real compiled output, an honest list of what
-this port skips, and a map back to the Java documents when you want the
-1000-exercise version of any of this.
+(Java) and has since moved away from it in places, listed in section 4.
 
-Every class and function named below was checked against the source
-tree with Glob/Grep before it went in this file -- if it's cited here,
-`grep -rn "ClassName" src/` finds it. Every code snippet in sections 2
-and 3 was compiled with MinGW g++ 16 against this repo's headers and
-`.cpp` files and actually run; the output shown is real, not
-illustrative.
+Every complete program below was extracted from this file, compiled and
+run on 2026-11-06 with g++ 15.2 on Ubuntu under WSL2, against the commit
+this file ships in. The outputs are pasted from those runs. Benchmark
+figures will differ on every run: see experiment (e).
 
-## 1. How this port works
+How the running system fits together is in
+[ARCHITECTURE.md](ARCHITECTURE.md). Which regulatory controls have code
+behind them is in [CONTROLS.md](CONTROLS.md). This is a research and
+engineering reference, not a production trading system.
 
-### The contract, in one paragraph
+## 1. How the code is written
 
-The C++ port is algorithm-faithful, not idiom-faithful: every class
-mirrors its Java original method-for-method, camelCase names kept
-(`black_scholes::price`, not `black_scholes::compute_price`), and the
-numerical algorithms are transcribed digit-for-digit -- Acklam's
-`normInv`, the Lanczos `logGamma`, Lentz's incomplete-beta continued
-fraction, the Cholesky pivot rule, GARCH grids, curve bootstraps. When
-the Java test suite pinned a hand-computed value to 1e-9, the C++ test
-pins the same value at the same tolerance. This is deliberate: the
-point of the port is that you can trust a C++ number because it is
-*provably* the same computation as the Java number, not a
-reimplementation that merely agrees on a handful of smoke tests.
+### Ancestry, and where it stops
 
-### Method naming
+Most classes started as method-for-method ports of the Java library, so
+names stay camelCase (`black_scholes::price`, not
+`black_scholes::compute_price`), and Java static classes became free
+functions in a matching namespace, or static methods when the original
+held state. The enum `OptionType` sits at `quantfinlib::` scope because
+every pricing header needs it.
 
-Java statics become free functions in a matching namespace, or static
-methods on a class when the Java original was a class with real state.
-Compare the pricer that every other package eventually calls:
-
-Java (`com.quantfinlib.pricing.BlackScholes`):
-
-```java
-public static double price(OptionType type, double spot, double strike,
-                           double rate, double carry, double vol, double timeYears) {
-    if (timeYears <= 0) {
-        return intrinsic(type, spot, strike);
-    }
-    if (vol <= 0) {
-        return Math.max(0, type.sign() * (spot * Math.exp(-carry * timeYears)
-                - strike * Math.exp(-rate * timeYears)));
-    }
-    ...
-}
-```
-
-C++ (`src/quantfinlib/pricing/black_scholes.hpp` /
-`black_scholes.cpp`):
-
-```cpp
-double price(OptionType type, double spot, double strike,
-             double rate, double carry, double vol, double timeYears) {
-    if (timeYears <= 0) {
-        return intrinsic(type, spot, strike);
-    }
-    if (vol <= 0) {
-        return std::max(0.0, sign(type) * (spot * std::exp(-carry * timeYears)
-                - strike * std::exp(-rate * timeYears)));
-    }
-    ...
-}
-```
-
-Same parameter order, same branch structure, same comment about *why*
-the `vol <= 0` branch exists (the ATM-forward 0/0 in `d1`). The `enum
-OptionType` moved from a nested Java enum to namespace scope in
-`quantfinlib::` because every other pricing header needs it too
-(`black76.hpp`, `barrier_option.hpp`, ...) -- the one naming departure
-that has nothing to do with C++ idiom and everything to do with one
-enum, many translation units.
+Agreement with Java is no longer the test of correctness. A number that
+matches Java can still be wrong, and several were until they were fixed
+here: the normal CDF, the quanto drift, FRTB stressed calibration and
+Expected Shortfall. Where this library has an independent reference,
+the reference wins. `tests/golden_independent_test.cpp`,
+`tests/golden_models_test.cpp` and `tests/golden_isda_test.cpp` hold
+those values.
 
 ### Exception mapping
 
-Java's `IllegalArgumentException` becomes `std::invalid_argument`
-everywhere, argument-checking message included. `SwapPricer` is a good
-minimal example (`src/quantfinlib/rates/swap_pricer.cpp`):
+Bad arguments throw `std::invalid_argument`, with the bad value in the
+message. A misused object, such as an empty `BarSeries` builder, throws
+`std::logic_error`. Corrupt files and I/O failures throw
+`std::runtime_error`. There is no library-wide exception hierarchy.
 
-Java:
-
-```java
-private static void requireTenor(int tenorYears) {
-    if (tenorYears < 1) {
-        throw new IllegalArgumentException("tenorYears must be >= 1, got " + tenorYears);
-    }
-}
-```
-
-C++:
-
-```cpp
-void requireTenor(int tenorYears) {
-    if (tenorYears < 1) {
-        throw std::invalid_argument("tenorYears must be >= 1, got "
-                                    + std::to_string(tenorYears));
-    }
-}
-```
-
-`IllegalStateException` (an empty `BarSeries.Builder.build()`, for
-example) maps to `std::logic_error`. There is no port-wide exception
-hierarchy invented on top of this -- if you have written C++ that
-catches `std::invalid_argument`, you already know how to catch
-everything this library throws.
+The hot trading path differs: `HftOrderBook`, `HftRiskGate` and
+`HftOrderGateway` return codes for a bad order, because a matching or
+order loop must not unwind over one.
 
 ### NaN gates
 
-Java's idiom for rejecting NaN inputs is `if (!(x > 0))` rather than
-`if (x <= 0)` -- the negated form is also true when `x` is NaN (every
-comparison against NaN is false), so it catches NaN and non-positive
-values in one branch without a second `Double.isNaN` check. The C++
-port keeps the exact idiom, not a cleaner-looking rewrite, because the
-whole point is that a reviewer who knows the Java source recognizes the
-C++ line instantly. You'll see `if (!(x > 0))` throughout `math_utils.cpp`,
-`yield_curve.cpp`, and the pricing headers.
+Input checks are written `if (!(x > 0))`, not `if (x <= 0)`. Every
+comparison with NaN is false, so the negated form catches NaN and
+non-positive values in one branch, and the second form lets NaN through.
+On the order path this decides whether a NaN price can reach a venue, so
+`HftRiskGate` validates the price before any limit.
 
 ### Bracket-checked solvers
 
-Every root-finder in this port (implied vol, bond YTM, credit-curve
-hazard bootstrap, Nelson-Siegel/Svensson fits) is bisection or a
-bisection-guarded Newton step, and every one of them checks the bracket
-before it starts rather than trusting the loop to converge. From
-`black_scholes.hpp`'s `impliedVol` doc comment:
+The root-finders (implied vol, bond YTM, credit-curve hazard bootstrap)
+check the bracket before they start instead of trusting the loop to
+converge. `black_scholes::impliedVol` returns NaN when a price is not
+attainable inside its vol bracket, so a stale quote surfaces as "no vol"
+and not as the search bound. `CreditCurve::bootstrap` searches `h` in
+`[1e-9, 10]`, and a quote no hazard can explain throws.
 
-```
-Returns NaN when the price is not attainable inside the [1e-4, 5.0] vol
-bracket (below intrinsic, or above the maximum BS price) -- a stale or
-rounded market price must surface as "no vol", not silently come back
-as the 500% search bound and poison a smile.
-```
+### Fail closed
 
-`CreditCurve::bootstrap` does the same thing on the hazard-rate axis:
-bisection on `h` in `[1e-9, 10]` with an explicit bracket check, "a
-quote no hazard can explain throws rather than returning the bound."
-The pattern repeats everywhere a solver exists in this codebase: no
-silent endpoint returns, ever.
+The trading packages share one rule: if the code cannot tell that an
+action is safe, it refuses. A fresh `HftRiskGate` rejects every order
+until limits and a reference are set. A position nobody can price trips
+the firm-wide breaker. A fill nobody can account for latches a kill.
+Stop 11 and experiments (f) and (g) show this working.
 
-### Hand-pinned tests
+### Tests
 
-The port ships 178 headers and 506 tests across 52 executables (all
-green as of this writing -- `ctest --test-dir build` reproduces that
-number). The tests are not generated or property-based in the pricing/
-rates/credit/risk/volatility packages: they are the SAME numeric values
-the Java suite pins, carried over at the same tolerance, because the
-whole port strategy depends on "does this C++ function return what the
-Java function returns" being a checkable, not an assumed, fact. Look at
-any file under `tests/` -- `tests/pricing_exotics_test.cpp`,
-`tests/backtest_trade_analytics_test.cpp` -- and you'll find literal
-expected doubles, not generated fixtures.
+`ctest --test-dir build` runs one executable per `tests/*_test.cpp`. The
+pricing, rates, credit and risk tests pin literal expected doubles.
+Continuous integration (`.github/workflows/ci.yml`) builds with GCC,
+Clang and MinGW, and runs AddressSanitizer with UBSan, and
+ThreadSanitizer. libFuzzer targets for the FIX decoder, ITCH, SBE and
+Checkpoint are under `fuzz/`.
 
-### The cross-port 138-label guarantee
+## 2. A guided tour in 14 stops
 
-This is the strongest claim in the whole project and it is mechanically
-checked, not asserted. A single probe program -- one file per language,
-identical inputs in identical order -- calls into Java, C++ and Python
-and prints 138 labelled results (`bs.call=...`, `ns.rmse=...`,
-`micro.hawkes.intensity=...`) at 15 significant figures. A tiny
-Python script then diffs the three outputs pairwise at 1e-9 relative
-tolerance (1e-6 for the handful of labels that come out of an iterative
-fit, where floating-point path-dependence in the last few digits is
-expected and stated up front). The harness lives in the Python repo,
-`tools/crossport/`:
-
-```
-tools/crossport/
-  Probe.java     -- the Java probe (source of truth for labels/order)
-  probe.cpp      -- this port's mirror
-  probe.py       -- the Python port's mirror
-  compare.py     -- pairwise diff at 1e-9 / 1e-6
-  java.out       -- checked-in Java output (138 lines)
-  cpp.out        -- checked-in C++ output
-  py.out         -- checked-in Python output
-```
-
-To re-run the C++ side of the guarantee yourself, from this repo:
+Read these in order; each one assumes the previous. Build the library
+once, on Linux:
 
 ```bash
-g++ -std=c++20 -O2 -I src ../quant-finance-py/tools/crossport/probe.cpp \
-    build/libquantfinlib.a -o /tmp/probe_cpp
-/tmp/probe_cpp > /tmp/cpp.out
-python ../quant-finance-py/tools/crossport/compare.py \
-    ../quant-finance-py/tools/crossport/java.out /tmp/cpp.out
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build --target quantfinlib
 ```
 
-A clean run prints `138 labels, 0 mismatches`. That is not a
-hypothetical -- it is the exact command this guide's author ran while
-writing this section, and the exact output it produced. If you break a
-numeric algorithm while extending this port, this is the fastest way to
-find out: the labels tell you which package regressed.
+Then compile any snippet from the repository root:
 
-## 2. A guided tour in 13 stops
-
-Read these in order; each one assumes the previous. Every "try it"
-snippet below compiles as shown against this repo, once you have built
-the library once (`cmake -S . -B build -G "MinGW Makefiles" &&
-cmake --build build --target quantfinlib`, per the top-level README) --
-the one-liners assume `build/libquantfinlib.a` exists.
+```bash
+g++ -std=c++20 -O2 -I src t.cpp build/libquantfinlib.a -pthread -o t && ./t
+```
 
 ### Stop 1 -- `util`: the numerical bedrock
 
-**What it does.** `MathUtils` (`src/quantfinlib/util/math_utils.hpp`):
-27 primitives every other package leans on -- mean/variance/stdDev,
-percentile, covariance/correlation, Cholesky, the Acklam `normInv`, the
-Abramowitz-Stegun `normCdf`, skewness/kurtosis, a NaN-safe `pairSort`.
+**What it does.** `math_utils` (`src/quantfinlib/util/math_utils.hpp`):
+the primitives every other package leans on: mean/variance/stdDev,
+percentile, covariance/correlation, Cholesky, the Cody `normCdf`, a
+Halley-refined Acklam `normInv`, skewness/kurtosis, a NaN-safe `pairSort`.
 
 **Read first:** `math_utils.hpp`'s doc comment, then `normCdf`/`normInv`
 -- everything downstream that touches a normal distribution (every
@@ -236,7 +125,6 @@ int main() {
 ```
 
 ```
-$ g++ -std=c++20 -I src t_util.cpp build/libquantfinlib.a -o t_util && ./t_util
 normCdf(1.2345)=0.891492  normInv(back)=1.234500  mean=3.000  stdDev=1.5811
 ```
 
@@ -271,7 +159,7 @@ int main() {
 size=5 lastClose=103.00 firstReturn=0.01000
 ```
 
-### Stop 3 -- `pricing`: Black-Scholes and its 20 siblings
+### Stop 3 -- `pricing`: Black-Scholes and its siblings
 
 **What it does.** Black-Scholes-Merton with a continuous carry (so one
 function prices equity options with a dividend yield and FX options
@@ -285,7 +173,38 @@ curve, dividends, and a fair-value blender.
 package either calls it directly (Margrabe reduces to it in the
 single-asset limit) or reuses its `d1`/`normCdf` plumbing.
 
-**Try it:** see Experiment (a) below -- it is this stop's exercise.
+**Try it:** Experiment (a) below prices a vanilla. A quanto shows why
+each rate has one job. The payoff is on a foreign asset, settled in
+domestic currency at a fixed conversion rate. Formally, under the
+domestic measure the asset drifts at `r_f - q - rho*sigmaS*sigmaFX`, and
+the value is `e^(-r_d T) * Black76(F_quanto, K, sigmaS, T)`, so the
+foreign rate only enters the forward and the domestic rate only
+discounts (Hull, the quanto section; Wystup 2006, 2.6):
+
+```cpp
+#include <cstdio>
+#include <initializer_list>
+#include "quantfinlib/pricing/quanto_option.hpp"
+using namespace quantfinlib;
+int main() {
+    double S = 100, K = 100, rd = 0.05, rf = 0.01, q = 0.0, sS = 0.2, sFx = 0.1, T = 1.0;
+    for (double rho : {-0.5, 0.0, 0.5}) {
+        std::printf("rho=%+.1f forward=%.4f call=%.4f\n", rho,
+                    quanto_option::quantoForward(S, rf, q, sS, sFx, rho, T),
+                    quanto_option::price(OptionType::CALL, S, K, rd, rf, q, sS, sFx, rho, T));
+    }
+}
+```
+
+```
+rho=-0.5 forward=102.0201 call=8.6525
+rho=+0.0 forward=101.0050 call=8.1026
+rho=+0.5 forward=100.0000 call=7.5771
+```
+
+Positive correlation lowers the forward: the asset tends to be high when
+the foreign currency is strong, and the fixed conversion gives that
+benefit away.
 
 ### Stop 4 -- `rates`: the yield curve and what stands on it
 
@@ -411,9 +330,9 @@ EGARCH, HAR-RV, a model-free volatility index (the VIX construction,
 Rogers-Satchell, Yang-Zhang), AIC/BIC model selection, volatility
 decomposition.
 
-**Read first:** `ewma_volatility.hpp` -- the simplest model in the
-package (one parameter, `lambda`) and the one the risk package's
-parametric VaR quietly assumes when you don't hand it a GARCH fit.
+**Read first:** `ewma_volatility.hpp`, the simplest model in the
+package: one parameter, `lambda`, and causal seeding, so `h_t` sees only
+returns before `t`.
 
 **Try it:**
 
@@ -431,7 +350,7 @@ int main() {
 ```
 
 ```
-latestVol=0.016971 annualizedVol=0.2694
+latestVol=0.016403 annualizedVol=0.2604
 ```
 
 ### Stop 8 -- `indicators`: the batch/streaming technical set
@@ -468,12 +387,14 @@ sma3.back()=108.6667  rsi5.back()=83.0273
 ### Stop 9 -- `backtest` core: `Backtester` and the strategy family
 
 **What it does.** Event-driven, single-instrument, long-only
-backtesting: signals fill at the close (slippage-adjusted), stop-loss/
-take-profit are checked intrabar with gap-aware fills, commission on
-both legs. Five shipped strategies (`strategies/`: SMA cross, EMA
-cross, RSI, MACD, Bollinger). Cost models, execution models with a
-cash-conservation contract, walk-forward analysis with warm folds, grid
-search.
+backtesting. A signal decided on bar t's close fills at bar t+1's open,
+the earliest price a real order can get. Filling on the signal bar needs
+`withSameBarCloseFill()`, which says what it is. Defaults are not free:
+`commissionRate` 0.001, `slippageRate` 0.0005, and each fill capped at
+10% of the bar's volume. Stop-loss and take-profit are checked intrabar
+with gap-aware fills. Five strategies ship in `strategies/`: SMA cross,
+EMA cross, RSI, MACD, Bollinger. Also here: cost models, execution
+models, walk-forward with warm folds, grid search.
 
 **Read first:** `backtester.hpp`, then `strategies/
 sma_cross_strategy.hpp` as the simplest concrete `TradingStrategy`.
@@ -484,10 +405,8 @@ sma_cross_strategy.hpp` as the simplest concrete `TradingStrategy`.
 
 **What it does.** `validation/`: purged K-fold with embargo (the fix
 for financial-label leakage), CSCV overfit probability, block
-bootstrap, deflated Sharpe, Monte Carlo trade reshuffle -- all seeded,
-where seeded, by the bit-exact `SplittableRandom` (`validation/
-splittable_random.hpp`) so a seeded Monte Carlo path matches the Java
-stream exactly. `portfolio/`: Kelly and fixed-fractional position
+bootstrap, deflated Sharpe, Monte Carlo trade reshuffle, seeded through
+`SplittableRandom` (`validation/splittable_random.hpp`). `portfolio/`: Kelly and fixed-fractional position
 sizing, inverse-volatility weighting, mean-variance/risk-parity/
 Black-Litterman optimizers, cross-sectional momentum, a portfolio-level
 backtester.
@@ -526,29 +445,40 @@ bug: this input's mean/variance ratio genuinely implies leveraging
 above 100%, which is exactly the kind of number that should make you
 distrust the input before you trust the leverage.)
 
-### Stop 11 -- `orderbook` + `trading`: the C++-only crown jewel
+### Stop 11 -- `orderbook` + `trading`: the order path
 
-**What it does.** This package does not exist in the Python port --
-it is the reason the C++ port exists at all. `HftOrderBook`
-(`orderbook/hft_order_book.hpp`): a dense integer-tick price ladder,
-occupancy bitmaps, pooled intrusive order nodes in parallel primitive
-arrays, an open-addressing id map with backward-shift deletion, one
-function-pointer trade sink -- zero allocation after construction,
-proven by a counting `operator new` hook over a million steady-state
-operations. `trading/HftRiskGate`: a zero-allocation pre-trade risk
-gate built on `std::atomic` with the same acquire/release discipline
-Java's `VarHandle` API expresses (on x86 that discipline compiles down
-to plain loads/stores, so correctness is free). `trading/
-OrderRingBuffer`: the cross-thread SPSC hand-off.
+**What it does.** `HftOrderBook` (`orderbook/hft_order_book.hpp`) is a
+price-time matching engine on a dense integer-tick ladder, with pooled
+order nodes and no allocation after construction, checked by a counting
+`operator new` test. `HftRiskGate` is the pre-trade gate.
+`HftOrderGateway` is the order state machine behind it, and
+`OrderRingBuffer` the hand-off to the venue thread.
 
-**Read first:** `hft_order_book.hpp` -- read the doc comment in full
-before the method list; it explains why rejections are return codes,
-never exceptions (a venue must not unwind its matching loop over a bad
-order).
+**The idea.** A gate that looks only at the current position can be
+walked past: send ten orders before any fill, and each one sees position
+zero. So the gate must count what is already working.
+
+**Formally.** With `openBuy` and `openSell` the quantities reserved by
+working orders, the gate holds
+
+    position + openBuy <= cap        position - openSell >= -cap
+
+`check()` asks and reserves nothing. `reserve()` asks and takes the
+quantity. Only `reserve()` keeps the inequality with several orders in
+flight, so `HftOrderGateway::submit` uses it, and gives quantity back on
+fill, cancel and reject.
+
+**Worked example.** A fresh gate rejects: every limit is zero and the
+collar is unconfigured. With a cap of 1500, two checks of 1000 both
+pass, because neither took anything. The second of two reserves fails.
+
+**Read first:** the comment at the top of `hft_risk_gate.hpp`, then the
+one in `hft_order_gateway.hpp`, then `hft_order_book.hpp`.
 
 **Try it:**
 
 ```cpp
+#include <cmath>
 #include <cstdio>
 #include "quantfinlib/orderbook/hft_order_book.hpp"
 #include "quantfinlib/trading/hft_risk_gate.hpp"
@@ -560,20 +490,38 @@ int main() {
     std::printf("bidId=%lld askId=%lld bestBid=%d bestAsk=%d\n",
                 (long long)bid, (long long)ask, book.bestBidTick(), book.bestAskTick());
 
+    auto name = [](int code) { return HftRiskGate::reasonName(code); };
     HftRiskGate gate(4);
-    gate.maxOrderQuantity(1000).maxOrderNotional(1e6).priceCollarPct(0.05);
+    std::printf("fresh gate: %s\n", name(gate.check(0, Side::BUY, 100, 100.0)).c_str());
+
+    gate.maxOrderQuantity(1000).maxOrderNotional(1e6).maxPositionQuantity(1500)
+        .priceCollarPct(0.05);
+    std::printf("limits, no reference: %s\n", name(gate.check(0, Side::BUY, 100, 100.0)).c_str());
+
     gate.setReferencePrice(0, 100.0);
-    int r1 = gate.check(0, Side::BUY, 500, 100.5);
-    int r2 = gate.check(0, Side::BUY, 500, 200.0);   // outside the 5% collar
-    std::printf("check1=%d(OK=%d) check2=%d(COLLAR=%d)\n",
-                r1, HftRiskGate::OK, r2, HftRiskGate::REJECT_PRICE_COLLAR);
+    int c1 = gate.check(0, Side::BUY, 1000, 100.5);
+    int c2 = gate.check(0, Side::BUY, 1000, 100.5);
+    int r1 = gate.reserve(0, Side::BUY, 1000, 100.5);
+    int r2 = gate.reserve(0, Side::BUY, 1000, 100.5);
+    std::printf("check,check: %s,%s  reserve,reserve: %s,%s  openBuy=%lld\n",
+                name(c1).c_str(), name(c2).c_str(), name(r1).c_str(), name(r2).c_str(),
+                (long long)gate.openQuantity(0, Side::BUY));
+    std::printf("at 200.0: %s  at NaN: %s\n", name(gate.check(0, Side::BUY, 10, 200.0)).c_str(),
+                name(gate.check(0, Side::BUY, 10, std::nan(""))).c_str());
 }
 ```
 
 ```
 bidId=1 askId=2 bestBid=9990 bestAsk=10010
-check1=0(OK=0) check2=4(COLLAR=4)
+fresh gate: MAX_ORDER_QTY
+limits, no reference: PRICE_COLLAR
+check,check: OK,OK  reserve,reserve: OK,MAX_POSITION  openBuy=1000
+at 200.0: PRICE_COLLAR  at NaN: INVALID_PRICE
 ```
+
+Nothing sets the reference for you on a standalone gate: wire your feed
+to `setReferencePrice`. `ShardedTradingEngine::publish` and
+`PaperTradingGateway::onQuote` do it themselves.
 
 ### Stop 12 -- `fx` + `crb`: the dealer desk
 
@@ -612,8 +560,8 @@ EQ:AAPL id=0 CCY:EUR id=1 size=2
 
 ### Stop 13 -- `alpha` + `microstructure`: the research desk
 
-**What it does.** `alpha`: a full research pipeline (context, nine
-factor generators, a signal evaluator, purge-aware validation, a
+**What it does.** `alpha`: a full research pipeline (context, factor
+generators, a signal evaluator, purge-aware validation, a
 backtester, portfolio construction, a report), Fama-MacBeth, calendar
 anomalies. `microstructure`: Almgren-Chriss optimal execution, TCA,
 market-impact models, per-bucket seasonality curves, queue/fill models,
@@ -622,8 +570,7 @@ covariance, Avellaneda-Stoikov optimal market-making, an alpha
 ensemble, an online learner.
 
 **Read first:** `microstructure/avellaneda_stoikov.hpp` -- short,
-self-contained, and the cleanest illustration in the whole codebase of
-"units contract" documentation (it states explicitly that
+self-contained, and a clear example of a units contract (it states that
 `priceVariancePerSecond` is a variance of the *price*, not the return).
 
 **Try it:**
@@ -649,10 +596,49 @@ Carrying 500 units long shades the bid down by six full points -- the
 market-maker is actively discouraging you from buying more, exactly the
 inventory-control behavior the model exists to produce.
 
-## 3. The five experiments
+### Stop 14 -- `fix`, `marketdata`, `sbe`, `persist`: the edges
 
-Each of these is a complete, compiled, run program. Paths assume you
-are in the repo root with `build/libquantfinlib.a` already built.
+**What it does.** `fix`: a FIX 4.4 session over TCP, initiator or
+acceptor, with a logon gate, CompID checks, MsgSeqNum rules, resend
+handling and a durable `FileSessionStore`. There is no TLS.
+`trading/fix_venue_bridge.hpp` connects it to the gateway. `marketdata`:
+the tick bus, an ITCH codec, a MoldUDP64 receiver, an L3 book builder.
+`sbe`: flyweight codecs. `persist`: `DurableFile` (checked writes,
+fsync, CRC-32) and `Checkpoint`, a file of named sections for learned
+state.
+
+**Read first:** the top of `fix/fix_session.hpp`, then
+`trading/fix_venue_bridge.hpp`, then [ARCHITECTURE.md](ARCHITECTURE.md).
+
+**Try it:** a checkpoint commits on `close()`, by writing a temporary
+file and renaming it over the old one, so a crash mid-save leaves
+yesterday's file whole.
+
+```cpp
+#include <cstdio>
+#include "quantfinlib/persist/checkpoint.hpp"
+using namespace quantfinlib;
+int main() {
+    const char* path = "demo.qflc";
+    Checkpoint::Writer w = Checkpoint::writer(path);
+    w.section("model.demo", [](BinWriter& o) { o.writeDouble(0.125); });
+    w.close();
+    double restored = 0;
+    Checkpoint::Reader r = Checkpoint::reader(path);
+    r.section("model.demo", [&](BinReader& i) { restored = i.readDouble(); });
+    std::printf("restored=%.3f\n", restored);
+    std::remove(path);
+}
+```
+
+```
+restored=0.125
+```
+
+## 3. The experiments
+
+Each of these is a complete program. Compile as shown at the start of
+section 2.
 
 ### (a) Price and greek a vanilla, verify put-call parity
 
@@ -676,17 +662,15 @@ int main() {
 ```
 
 ```
-call price=7.102933 delta=0.477338 gamma=0.018268 vega=34.252083 theta=-6.450268 rho=30.473115
-put  price=10.514007 delta=-0.515191
+call price=7.102945 delta=0.477338 gamma=0.018268 vega=34.252083 theta=-6.450267 rho=30.473110
+put  price=10.514020 delta=-0.515190
 parity check: C-P=-3.41107442  S*e^-qT-K*e^-rT=-3.41107442  |gap|=0.000e+00
 ```
 
 Zero gap to the printed precision. This is the put-call parity identity
 that gate-checks any option pricer: if it doesn't hold exactly (to
 floating-point noise), something in the pricer's carry/discount
-handling is wrong. (`call price=7.102933` is also, not coincidentally,
-label `bs.call` in the cross-port probe -- Section 1's 138-label
-guarantee is checking exactly this number against Java and Python.)
+handling is wrong.
 
 ### (b) Bootstrap a curve and price a swap at par
 
@@ -726,7 +710,10 @@ did its job. Note that `parRate(curve, t)` recovers exactly the input
 small," is what "the result reprices every input exactly" means in
 `yield_curve.hpp`'s doc comment.
 
-### (c) Run a backtest with a strategy and read TradeAnalytics honestly
+### (c) Run a backtest and read TradeAnalytics plainly
+
+The same strategy on the same series, first with the defaults, then
+with the fill moved to the signal bar's close and costs set to zero.
 
 ```cpp
 #include <cmath>
@@ -751,37 +738,32 @@ int main() {
     }
     BarSeries series = BarSeries::of("DEMO", closes);
     SmaCrossStrategy strat(10, 30);
-    BacktestConfig cfg = BacktestConfig::defaults().withCommission(0.0005);
+    BacktestConfig cfg = BacktestConfig::defaults();
     BacktestResult result = backtester::run(strat, series, cfg);
-    std::printf("%s\n", result.toString().c_str());
-    if (result.trades().size() >= 2) {
-        auto ta = trade_analytics::analyze(result.trades());
-        std::printf("expectancy=%.4f payoffRatio=%.4f winRate=%.3f kelly=%.4f "
-                    "maxWinStreak=%d maxLossStreak=%d avgBarsWin=%.1f avgBarsLoss=%.1f\n",
-                    ta.expectancy, ta.payoffRatio, ta.winRate, ta.kellyFraction,
-                    ta.maxWinStreak, ta.maxLossStreak, ta.avgBarsHeldWinners,
-                    ta.avgBarsHeldLosers);
-    }
+    std::printf("defaults:  %s\n", result.toString().c_str());
+    auto ta = trade_analytics::analyze(result.trades());
+    std::printf("expectancy=%.4f payoffRatio=%.4f winRate=%.3f kelly=%.4f maxLossStreak=%d\n",
+                ta.expectancy, ta.payoffRatio, ta.winRate, ta.kellyFraction, ta.maxLossStreak);
+    BacktestConfig flattering = cfg.withSameBarCloseFill().withCommission(0).withSlippage(0);
+    SmaCrossStrategy strat2(10, 30);
+    std::printf("flattered: %s\n", backtester::run(strat2, series, flattering).toString().c_str());
 }
 ```
 
 ```
-SMA_CROSS(10,30) on DEMO: totalReturn=-5.26%, CAGR=-3.36%, sharpe=-1.13, sortino=-1.48, calmar=-0.45, maxDD=7.42%, profitFactor=0.25, winRate=14.3%, trades=7
-expectancy=-751.4240 payoffRatio=1.5100 winRate=0.143 kelly=0.0000 maxWinStreak=1 maxLossStreak=5 avgBarsWin=52.0 avgBarsLoss=17.2
+defaults:  SMA_CROSS(10,30) on DEMO: totalReturn=-6.83%, CAGR=-4.37%, sharpe=-1.44, sortino=-1.85, calmar=-0.49, maxDD=8.90%, profitFactor=0.16, winRate=14.3%, trades=7
+expectancy=-975.6603 payoffRatio=0.9305 winRate=0.143 kelly=0.0000 maxLossStreak=5
+flattered: SMA_CROSS(10,30) on DEMO: totalReturn=-4.59%, CAGR=-2.93%, sharpe=-0.99, sortino=-1.30, calmar=-0.42, maxDD=6.95%, profitFactor=0.29, winRate=14.3%, trades=7
 ```
 
-Read this honestly, as instructed, rather than cherry-picking a seed
-that looks better: a 10/30 SMA cross on 400 bars of mostly-noise data
-with a small sinusoidal drift loses money (-5.26% total return, Sharpe
--1.13), wins only 14.3% of the time, and its Kelly fraction correctly
-comes back 0 -- the sizing math is telling you not to trade this system
-at all, on this data, with this signal. That is `TradeAnalytics` and
-`Kelly` doing exactly their job: a losing system does not get dressed up
-by better statistics elsewhere in the report. Changing the noise seed
-or the SMA periods will change these numbers -- that variability, not a
-single flattering run, is the actual lesson of trying this yourself.
+Read this plainly. A 10/30 SMA cross on 400 bars of mostly noise loses
+6.83% at the defaults, wins 14.3% of its trades, and its Kelly fraction
+comes back 0: the sizing maths says not to trade it. Same-bar fills with
+no costs recover 2.24 points of that with the same seven trades, and
+that gap is pure flattery, since no real order gets those fills. A
+different seed or different periods will change every number here.
 
-### (d) Run OverfitProbability on a deliberately overfit signal
+### (d) Run OverfitProbability on pure noise
 
 ```cpp
 #include <cstdio>
@@ -832,155 +814,260 @@ trial 12: PBO=0.6286
 mean PBO over 12 trials = 0.4643
 ```
 
-This is the honest version of "watch it get caught": no single
-variant here has real edge, so on any ONE draw the "in-sample winner"
-can look great out of sample purely by chance (trial 1's PBO of 0.13
-would, taken alone, look like a passing grade). The mean across 12
-independent draws -- 0.4643 -- sits right at the 0.5 danger line the
-module's own docstring names as "the selection is pure noise-mining."
-That is exactly where 20 genuinely edge-free variants should land, and
-it is why the rule of thumb is stated as PBO across repeated evidence,
-never a verdict from a single backtest.
+No variant here has any edge, so on one draw the in-sample winner can
+look fine out of sample by chance: trial 1's PBO of 0.13 would, alone,
+look like a pass. The mean across 12 independent draws, 0.4643, sits
+near 0.5, where selection carries no information. PBO is evidence to
+collect over repeated samples, not a verdict from one backtest.
 
-### (e) Build and run `benchmarks/ull_bench`, and interpret the numbers honestly
+### (e) Run `benchmarks/ull_bench` and read it with care
 
 ```bash
 cmake --build build --target ull_bench
-./build/ull_bench.exe
+./build/ull_bench
 ```
 
-Real output from this repo, on the machine this guide was written on:
+An excerpt from one run. **Indicative only: WSL2, unpinned, on a shared
+desktop.** No figure here is a claim about any other host.
 
 ```
-ULL benchmarks (C++ port) -- TSC 0.4007 ns/cycle (2.50 GHz)
-CAVEAT: Windows, unpinned cores, no RT priority -- scheduler
-preemptions (~ms) own p99.9+/max; compare medians. Java
-baselines are JIT-warmed medians from docs/ULTRA_LOW_LATENCY.md.
+cpu:      Intel(R) Core(TM) 5 120U, 12 logical
+virtual:  WSL2. vCPUs float over physical cores, so pinning here pins a
+          vCPU only, and the Windows host can preempt it at any time.
+pinning:  NONE. Threads float; expect the tail to measure the scheduler.
+timer:    fenced rdtsc/rdtscp, 0.4006 ns/tick, floor (empty pair) 49.7 ns, not subtracted
 
-gate check                   batch     16.8 ns/op (  59.60 Mops/s) | rdtsc p50    14 ns  p99      37 ns | Java: ~3 ns
-  (book after run: resting=16382 trades=2933559)
-book mixed add/cancel        batch    268.9 ns/op (   3.72 Mops/s) | rdtsc p50   196 ns  p99     848 ns | Java: ~204 ns median, 7M+ ops/s
-ring publish->consume        cross-thread             | rdtsc p50   472 ns  p99  638976 ns | Java: publish->strategy p50 204 ns
-  (venue book after run: resting=16384 trades=1625180 orders=3200000)
-tick-to-order composite      batch    221.2 ns/op (   4.52 Mops/s) | rdtsc p50   156 ns  p99     720 ns | Java: p50 504 ns, p99 1 us
+stage (ns)                                           n     mean     p50     p90     p99
+gate check, one call, fenced                   2000000     61.7      53      70      70
+  unfenced batch mean 12.7 ns/call: a throughput figure, calls overlap
+book 16k add                                   2019324    136.5     114     196     312
+book 16k cancel                                1780706    195.1     172     280     424
+book 1M add                                    2019555    371.0     328     472     624
+book 1M cancel                                 1780514    856.5     784    1120    1376
+ring hand-off, busy-spin consumer               500000  25481.7     328     424  368640
+bus publish->listener, BUSY-SPIN consumer       500000   6027.5     360     472  135168
+bus publish->listener, PARKED consumer          200000  76973.3   64512  120832  499712
+single-thread code path (no I/O, no core hop)   2000000    157.4     140     196     280
 ```
 
-Compare this against the numbers quoted in the top-level README (gate
-check 2.7 ns/op, book mixed add/cancel 49.5 ns/op, ring publish-to-
-consume p50 98 ns, tick-to-order p50 47 ns) and they do not match this
-run -- gate check came back 5x slower here, and the ring's p99 shows a
-639-microsecond outlier. This is not a regression; it is the
-benchmark's own printed caveat proving itself: this machine, at this
-moment, had other things scheduled on its cores, and an unpinned
-Windows box's tail latency measures the scheduler, not the code. Run it
-two or three times yourself, at different times, and you will see the
-medians cluster while the p99/p99.9 columns swing by an order of
-magnitude -- that swing, reproduced live, is the whole reason the
-README says "compare medians" and prints its own caveat rather than
-asking you to trust a single number. The Java baselines quoted on the
-right of each line are JIT-warmed medians from a *different* run on a
-*different* machine (documented in the Java repo's
-`docs/ULTRA_LOW_LATENCY.md`) -- treat the comparison as directional
-(both engines are in the tens-to-low-hundreds of nanoseconds per
-operation, zero heap allocation, single-digit-microsecond p99 under
-load), not as a claim that either language beat the other by a
-specific, reproducible factor on your hardware.
+Other builds were running during this run (load average about 9), so
+these are worse than a quiet host would give. Four things to take from
+it:
 
-## 4. What is deliberately different here
+- The fenced gate figure, 53 ns, sits on the 49.7 ns timer floor, so it
+  says only that one call is below what this timer resolves.
+- The book slows as it grows: an add costs about three times as much at
+  1M resting orders as at 16k. Quote the size with the number.
+- A busy-spin consumer and a parked one differ by two orders of
+  magnitude. A bus figure without that label means nothing.
+- The hand-off p99 is hundreds of microseconds, and the mean is far above
+  the p50. That tail belongs to the host, as the bench's hiccup monitor
+  shows: its own p99 stall was 2.29 ms. Use the medians here.
 
-**Skipped packages, stated plainly.** As of this port (Phases 1-3,
-per the top-level README), everything in the Java "what's ported" table
-above is here: `util`, `data`, `pricing`, `rates`, `credit`,
-`commodities`, `markets`, `risk`, `volatility`, `indicators`,
-`backtest` (+ `strategies`/`validation`/`portfolio`), `orderbook`,
-`trading`, `fx`, `crb`, `alpha`, `microstructure`. What is NOT here yet
-(Phase 4, in progress as this guide is being written -- you may already
-see partial `fix/`, `marketdata/` or `sbe/` directories appear in the
-tree, mid-port and not yet in the README's table or this guide):
-connectivity -- a FIX engine, market-data feeds, SBE/ITCH codecs. If
-you are reading this after Phase 4 lands, check the README's package
-table before assuming this guide is stale on that point; this guide
-was deliberately written to cite only what exists in the table at the
-time it was written.
+The last stage is one thread running ring, strategy, gate, order ring
+and book. It has no parsing, network, encoding or core hop, so it is the
+cost of a code path and not a latency from any wire.
 
-**The persistence lane does not exist in either non-Java port.** There
-is no snapshot/restore, no write-ahead log, no durable order-book
-recovery story here or in the Python port. That is Java-only territory
-today; if your interest in this library is "can I recover an order
-book's exact state after a crash," the Java repo is the only one of the
-three with an answer.
+### (f) Follow one order through its life
 
-**RNG-stream policy: bit-exact, not merely distributionally similar.**
-`validation/splittable_random.hpp` is a from-scratch C++ reimplementation
-of `java.util.SplittableRandom`'s single-stream constructor path --
-Stafford variant 13 mix64, the murmur3-style mix32, and Java's exact
-`nextInt(bound)` rejection loop, including how Java's signed 32-bit
-integer overflow is reproduced with unsigned arithmetic so it wraps
-identically. The payoff: any Java test that seeded a Monte Carlo trade
-shuffle, an optimizer's random sampling, or a bootstrap path draws the
-IDENTICAL sequence of doubles here, so a seeded test can pin the exact
-same expected value in both languages. This is a stronger (and more
-expensive to build) guarantee than "the distribution looks the same" --
-it is "the stream IS the same," checked bit for bit. The Python port
-takes the opposite, cheaper approach on this one axis (see its own
-LEARN.md): it pins the distribution's *property* instead of the exact
-stream and says so in the docstring. That difference is intentional,
-not an oversight in either port -- C++ needed bit-exactness for its
-Monte Carlo trade-shuffle tests to carry over Java's pinned expected
-values; Python's research-lane tests only need the statistic that
-comes out of the stream to be right, not the stream itself.
+**The idea.** An order is not finished when it is sent. Until the venue
+answers, the quantity could still fill, so it stays reserved.
 
-**Performance positioning.** This port owns the nanosecond story for
-the family, with numbers measured on real hardware and printed with
-their own caveats rather than asserted: `benchmarks/ull_bench.cpp`
-gives you gate-check, order-book, ring-handoff and tick-to-order
-latencies, medians in the tens-to-low-hundreds of nanoseconds, zero
-heap allocation enforced by a counting `operator new` hook. Python owns
-research ergonomics -- if you want to explore a model interactively,
-plot something, or iterate quickly on a signal, that is the port to
-reach for, not this one. Java remains the reference: when Java, C++ and
-Python disagree, Java's number is what the other two are checked
-against (Section 1's cross-port guarantee), not the other way around.
+**Formally.** `QUEUED` (in the ring), `SENT` (delivered, no ack), `LIVE`
+(acked), then done, when the reservation is released. Reservation is the
+quantity that can still fill. While a replace is pending it is
+`max(old, new)` less what has filled, because either could apply until
+the venue answers. `replace` takes the new leaves; the wire message
+carries the FIX total, including what has filled.
 
-## 5. Where the deep material lives
+**Worked example.** `pollOnce()` stands in for the venue thread and the
+`on*` calls stand in for the FIX bridge, so the run is deterministic.
 
-This guide is deliberately the short version. When you want the long
-version, everything is in the Java repo, and the concepts and formulas
-transfer 1:1 across the port -- only the syntax differs (camelCase
-stays camelCase here; Python is the one that renames to snake_case).
+```cpp
+#include <cstdio>
+#include "quantfinlib/trading/hft_order_gateway.hpp"
+using namespace quantfinlib;
+static const char* kType[] = {"NEW", "CANCEL", "REPLACE"};
+int main() {
+    HftRiskGate gate(4);
+    gate.maxOrderQuantity(1000).maxOrderNotional(1e6).maxPositionQuantity(1500)
+        .priceCollarPct(0.05);
+    gate.setReferencePrice(0, 100.0);
+    HftOrderGateway gw(1024, gate, false);
+    gw.addVenueListener([](const VenueMessage& m) {
+        std::printf("  wire: %s qty=%lld px=%.2f\n", kType[(int)m.type],
+                    (long long)m.quantity, m.price);
+    });
+    auto show = [&](const char* what) {
+        std::printf("%-16s position=%lld openBuy=%lld\n", what, (long long)gate.position(0),
+                    (long long)gate.openQuantity(0, Side::BUY));
+    };
+    std::int64_t id = gw.submit(0, Side::BUY, 1000, 100.0, 1);
+    show("submit 1000");
+    std::int64_t second = gw.submit(0, Side::BUY, 1000, 100.0, 2);
+    std::printf("second submit: %s\n", HftRiskGate::reasonName((int)-second).c_str());
+    gw.pollOnce();                 // the venue thread delivers: SENT
+    gw.onOrderAck(id);             // LIVE
+    gw.onFill(id, 0, Side::BUY, 400);
+    show("fill 400");
+    std::int64_t rep = gw.replace(id, 300, 100.5, 3);   // 300 left working
+    gw.pollOnce();
+    show("replace pending");
+    gw.onReplaceAck(rep);
+    show("replace acked");
+    std::int64_t can = gw.cancel(id, 4);
+    gw.pollOnce();
+    gw.onOrderOut(can);
+    show("cancelled");
+}
+```
 
-**`LEARN.md`** (the Java repo, ~26,000 lines, 1000 worked exercises).
-This is where you go when Section 3's five experiments aren't enough --
-every package in this guide's tour has dozens of matching exercises
-there, phrased against the Java API. Translate mechanically: Java
-`BlackScholes.price(...)` becomes C++ `black_scholes::price(...)`,
-Java `YieldCurve.bootstrapAnnualParSwaps(...)` becomes C++
-`YieldCurve::bootstrapAnnualParSwaps(...)`, and the numbers you get back
-should match to the tolerances this guide's Section 1 describes. If an
-exercise's expected answer does not match what this port returns, that
-is worth a bug report -- the whole point of the port contract is that
-divergence should not happen silently.
+```
+submit 1000      position=0 openBuy=1000
+second submit: MAX_POSITION
+  wire: NEW qty=1000 px=100.00
+fill 400         position=400 openBuy=600
+  wire: REPLACE qty=700 px=100.50
+replace pending  position=400 openBuy=600
+replace acked    position=400 openBuy=300
+  wire: CANCEL qty=700 px=100.50
+cancelled        position=400 openBuy=0
+```
 
-**`COOKBOOK.md`** (the Java repo, 300 recipes). Short, task-oriented
-"how do I..." entries -- "how do I bootstrap a curve from bond
-prices instead of par swaps," "how do I size a position with vol
-targeting," that kind of thing. Read a recipe, then look up the
-equivalent C++ class name in this guide's Section 2 tour (or `grep -rn
-ClassName src/` if it's not one of the stops) and translate the calls;
-the recipe's logic does not change, only the call syntax.
+Read the reservation column. The refused second submit shows the cap
+counting a working order at position 0. After the fill, 400 moved from
+open to position. During the pending replace, open stays at 600, the
+larger of old and new, and drops to 300 only on the ack. The replace
+went out with quantity 700: 400 filled plus 300 leaves. The cancel gives
+back the last 300, and the position stays, because a fill is a fact.
 
-**`DIAGRAMS.md`** (the Java repo, 100 diagrams). Architecture and
-data-flow diagrams -- package dependency graphs, the backtester's
-event loop, the order book's matching-engine state machine. These are
-language-agnostic by construction (they describe control flow and data
-shape, not syntax), so they apply to this port without translation --
-the `HftOrderBook` diagram describes this repo's `orderbook/
-hft_order_book.hpp` exactly, node pool and occupancy bitmaps included.
+### (g) Trip a kill and see what clears it
 
-**The formula appendix** (the Java repo README, ~175 entries). A
-flat lookup table of every closed-form formula in the library, with
-the class/method that implements it. Use it as a check on any pricer
-in this guide's Section 2 tour: find the class name, read the formula,
-then confirm the C++ header's doc comment states the same formula (it
-will -- that is the whole port contract from Section 1) before you
-trust a result you have not independently derived.
+**The idea.** A kill must not undo itself, and one party must not be
+able to clear another's reason for stopping.
+
+**Formally.** `killMask` holds one latched bit per source:
+`KILL_OPERATOR`, `KILL_AGGREGATOR`, `KILL_DEAD_MAN`, `KILL_GATEWAY`,
+`KILL_VENUE_LINK`. A source clears only its own bit, and nothing clears
+on a timer. While any bit is set, only an order that strictly reduces
+the position passes. `GlobalRiskAggregator::manualReset()` clears the
+aggregator's bit, and refuses while gross is at or above
+`cap x resumeFraction` or any position has no price.
+
+**Worked example.** 1000 shares at 100 is 100,000 gross against a cap of
+50,000, so the resume level is 45,000.
+
+```cpp
+#include <chrono>
+#include <cstdio>
+#include <thread>
+#include "quantfinlib/trading/global_risk_aggregator.hpp"
+#include "quantfinlib/trading/hft_risk_gate.hpp"
+using namespace quantfinlib;
+int main() {
+    HftRiskGate gate(4);
+    gate.maxOrderQuantity(1000).maxOrderNotional(1e6).maxPositionQuantity(5000)
+        .priceCollarPct(0.05);
+    gate.setReferencePrice(0, 100.0);
+    gate.onFill(0, Side::BUY, 1000);
+    GlobalRiskAggregator agg({&gate}, 50000.0, 0.9, 1'000'000);
+    while (!agg.isTripped()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    gate.kill(true);
+    std::printf("mask=%u\n", gate.killMask());
+    std::printf("buy: %s  sell: %s\n",
+                HftRiskGate::reasonName(gate.check(0, Side::BUY, 10, 100.0)).c_str(),
+                HftRiskGate::reasonName(gate.check(0, Side::SELL, 10, 100.0)).c_str());
+    std::printf("manualReset at gross 100000: %d\n", agg.manualReset());
+    gate.onFill(0, Side::SELL, 700);
+    bool cleared = agg.manualReset();
+    std::printf("manualReset at gross 30000: %d  mask=%u\n", cleared, gate.killMask());
+    gate.kill(false);
+    std::printf("after operator reset: mask=%u killed=%d\n", gate.killMask(), gate.isKilled());
+}
+```
+
+```
+mask=3
+buy: KILLED  sell: OK
+manualReset at gross 100000: 0
+manualReset at gross 30000: 1  mask=1
+after operator reset: mask=0 killed=0
+```
+
+Mask 3 is the aggregator (2) and the operator (1). A buy is refused and
+a sell passes, because it strictly reduces the position. The first reset
+is refused at gross 100,000. At 30,000 it succeeds and clears only its
+own bit, so the operator's kill stands until the operator lifts it.
+
+### (h) Paper trade through the same gate
+
+`PaperTradingGateway` takes a gate in its constructor; running without
+one needs the factory `unsafeWithoutRiskGate`. Fills come from a
+`QueueFillSimulator` per symbol: an aggressive order takes only displayed
+depth and a market remainder is cancelled. Time is event time, so an
+order reaches the simulated venue when a later feed event moves the
+clock past its arrival.
+
+```cpp
+#include <cstdio>
+#include "quantfinlib/trading/paper_trading_gateway.hpp"
+using namespace quantfinlib;
+int main() {
+    HftRiskGate gate(4);
+    gate.maxOrderQuantity(1000).maxOrderNotional(1e6).maxPositionQuantity(5000)
+        .priceCollarPct(0.05);
+    PaperTradingGateway paper(1'000'000.0, 0.0005, gate, {{"DEMO", 0}},
+                              PaperTradingGateway::FillConfig::zeroLatency());
+    paper.onQuote("DEMO", 1000, 99.99, 500, 100.01, 200);   // also sets the reference
+    paper.submitLimit("DEMO", Side::BUY, 5000, 100.01);     // above maxOrderQuantity
+    std::int64_t id = paper.submitMarket("DEMO", Side::BUY, 300);
+    paper.onQuote("DEMO", 2000, 99.99, 500, 100.01, 200);
+    std::printf("position=%.0f cash=%.2f cancelledRemainder=%d\n", paper.position("DEMO"),
+                paper.cash(), paper.status(id) == OrderStatus::CANCELED);
+    for (const std::string& line : paper.rejectionLog()) std::printf("log: %s\n", line.c_str());
+}
+```
+
+```
+position=200 cash=979988.00 cancelledRemainder=1
+log: order 1: MAX_ORDER_QTY for DEMO
+```
+
+The order above `maxOrderQuantity` is refused by the gate and logged.
+The market order for 300 meets 200 displayed, so 200 fill at 100.01 and
+the remainder is cancelled. Cash falls by 20,002 plus 10 of commission.
+
+## 4. Where this differs from the Java library
+
+**Deliberate maths changes.** `normCdf` is Cody's rational approximation
+and `normInv` adds a Halley step; the quanto takes a foreign rate and
+drifts on it; FRTB stressed calibration, Expected Shortfall and EWMA
+seeding were corrected. Do not expect Java's digits on these.
+
+**Backtest defaults.** Next-open fills and non-zero costs.
+`backtest_config.hpp` records the deviation.
+
+**The live lane.** Reservations, the order state machine, latched kills,
+self-trade prevention and the FIX bridge were reworked here. See
+[ARCHITECTURE.md](ARCHITECTURE.md).
+
+**Persistence.** `Checkpoint` keeps the Java framing, except that section
+names are plain UTF-8. `FileSessionStore` has a private format with CRCs
+and is not compatible with the Java store.
+
+**Random numbers.** `validation/splittable_random.hpp` reimplements
+`java.util.SplittableRandom`'s single-stream path, so seeded shuffles and
+bootstraps draw the same sequence as Java.
+
+**What is not here.** No venue certification, no TLS, no order audit
+log, no order status query after a reconnect. Nothing in this library is
+evidence of a trading edge.
+
+## 5. Where more material lives
+
+The Java repository has a much longer `LEARN.md`, a `COOKBOOK.md` and
+`DIAGRAMS.md`. The concepts carry over, and calls translate mechanically
+(Java `BlackScholes.price(...)` is `black_scholes::price(...)`). Check
+any answer against section 4 first: a difference on those topics is
+expected, and Java diagrams of the order book or gateway describe the
+Java layout, not this one.
