@@ -1,91 +1,61 @@
 # Quant-Finance-CPP
 
-C++20 port of [Quant-Finance-Library](https://github.com/AshJha0/Quant-Finance-Library)
-(the Java reference implementation, v1.17.0) -- zero external dependencies,
-standard library only, tests on a vendored micro-harness.
+A C++20 quant finance and low-latency trading library, with no external dependencies. It began as a port of the Java [Quant-Finance-Library](https://github.com/AshJha0/Quant-Finance-Library) v1.17 and has since taken selected fixes from Java 4.0, plus its own work.
 
-The port is algorithm-faithful: every class mirrors its Java original
-method-for-method (camelCase names kept), the numerical algorithms are
-transcribed digit-for-digit (Acklam normInv, Lanczos logGamma, Lentz
-incomplete beta, Cholesky with the relative pivot rules), and the Java
-test suite's hand-pinned values transfer at the same tolerances --
-including a bit-exact `SplittableRandom` so seeded Monte Carlo replays
-the Java streams. NaN-rejecting input gates throw `std::invalid_argument`;
-solvers are bracket-checked and never return an endpoint.
+**What this is:** a verified research and engineering reference. **What it is not:** a production trading system. It is not venue-certified, has no TLS, and contains no evidence of trading edge.
 
-## What's ported (Phases 1-3)
+## What is inside
 
-| Package | Contents |
+| Area | Packages | Notes |
+|---|---|---|
+| Pricing and rates | `pricing`, `rates`, `credit`, `fx`, `volatility`, `commodities`, `markets` | Black-Scholes family, Bachelier, Heston, SABR, SVI, barriers, multi-curve OIS bootstrap, day counts, holiday calendars, ISDA CDS, GARCH MLE |
+| Risk | `risk` | VaR, ES, FRTB ES fragment, stress, copulas, backtests |
+| Research | `backtest`, `alpha`, `microstructure` | Next-open fills, as-of data, overfitting statistics, impact and queue models |
+| Execution | `execution`, `crb` | Schedulers, SOR, queue fill simulator, central risk book calculator |
+| Live lane | `trading`, `orderbook`, `marketdata` | Fail-closed gate, order lifecycle, kill sources, bus, rings, book |
+| Connectivity | `fix`, `sbe`, `persist`, `data` | FIX 4.4 subset with venue bridge, ITCH subset, MoldUDP64, IEX, checkpoints |
+
+Read [ARCHITECTURE](docs/ARCHITECTURE.md), the guided tour in [LEARN](docs/LEARN.md), and the [CHANGELOG](CHANGELOG.md). Version 2.0.0 is breaking.
+
+## Evidence
+
+Each claim has a way to check it.
+
+- **Tests:** about 100 executables and 1,099 `TEST` cases, on GCC, Clang, ASan/UBSan and TSan in CI.
+- **Correctness:** golden tests from QuantLib 1.44, scipy and mpmath, in `tests/golden_*`, independent of the Java code.
+- **Real messages:** one day of IEX DEEP and DEEP+ replayed with no gaps or crossed books. See [REPLAY_VALIDATION](docs/REPLAY_VALIDATION.md). Correctness only, one day, one venue. Data provided for free by IEX; [terms](https://www.iex.io/products/market-data-connectivity/hist-terms).
+- **Controls:** [CONTROLS](docs/CONTROLS.md) maps controls to MiFID II RTS 6 and SEC 15c3-5. It is not a compliance certification.
+
+## Latency
+
+Indicative only: WSL2, unpinned, Intel Core 5 120U, GCC 15. Run `ull_bench` to reproduce it on your machine. Tails here measure the host, not the code.
+
+| Stage | p50 |
 |---|---|
-| `util` | MathUtils: 27 numerical primitives |
-| `data` | Bar (validates high >= low, as the Java record does) |
-| `pricing` | Black-Scholes (all greeks, implied vol), Black-76, higher-order greeks, binomial tree, digitals, barriers, touches, vanna-volga, Margrabe/Kirk, quanto, variance swap, Asian (Kemna-Vorst + Turnbull-Wakeman), structured notes, autocallable, Heston (stable formulation), SABR, vol surface, forward curve, dividends, fair value, triangular arbitrage |
-| `rates` | YieldCurve bootstrap, bond pricer (bracket-checked YTM), Nelson-Siegel, Svensson, swap pricer (annuity/par/DV01), Vasicek/CIR/Hull-White, key-rate durations, swaptions/caps |
-| `credit` | Credit curve (hazard bootstrap), CDS pricer (incl. the sub-grid maturity gate), Z-spread, CVA |
-| `commodities` | Futures curve: roll yield, implied carry, contango/backwardation |
-| `markets` | Index construction (divisor continuity), private markets (IRR/TVPI/KS-PME/Geltner) |
-| `risk` | Four VaR flavors + ES, component VaR (Euler), Ledoit-Wolf shrinkage, EVT, stress + reverse stress, FRTB ES, P&L attribution (KS), VaR backtests, PCA, Gaussian/t copulas, concentration, counterparty PFE, settlement risk |
-| `volatility` | EWMA, GARCH/GJR/EGARCH, HAR-RV, model-free vol index, range estimators (Parkinson/GK/RS/Yang-Zhang), AIC/BIC, vol decomposition |
-| `indicators` | Batch + streaming indicator set (SMA/EMA/RSI/MACD/Bollinger/ATR/VWAP...) |
-| `backtest` | Full strategy engine (Backtester, 5 strategies, cost models, execution models with the cash-conservation contract, walk-forward with warm folds, grid search) + trade/performance/drawdown analytics; `validation/` purged K-fold, CSCV overfit probability, block bootstrap, deflated Sharpe, Monte Carlo trade reshuffle, bit-exact Java SplittableRandom; `portfolio/` position sizing, optimizers, portfolio backtester |
-| `orderbook` | HftOrderBook (dense ladder, bitmaps, pooled nodes, IOC/FOK/post-only) proven equivalent to the reference book under random operation streams |
-| `trading` | HftRiskGate (atomics, reduce-vs-flip), order ring buffer |
-| `fx` | Currency-pair conventions + calendars, swap points, FX swaps/NDFs, delta-quoted vol surface (premium-adjusted), tier book, LP scorecard/router |
-| `crb` | Central risk book: factor-space netting, skewed quoting, internalization, L1 hedge optimizer, auto-hedger, router, P&L ledger |
-| `alpha` | Research pipeline: context/factors/evaluator/validation/backtester/construction/report, Fama-MacBeth, calendar anomalies |
-| `microstructure` | Almgren-Chriss, TCA, impact models, seasonality curves (per-bucket seeding), queue/fill models, Lee-Ready, VPIN, Hawkes, EWMA covariance, Avellaneda-Stoikov, ensemble + online learner |
+| Book add / cancel, 16k resting | 35 / 43 ns |
+| Book add / cancel, 1M resting | 132 / 264 ns |
+| Ring hand-off, busy-spin | 132 ns |
+| Bus publish to listener, busy-spin | 148 ns |
+| Single-thread code path, no I/O or core hop | 43 ns |
 
-237 headers - 730 tests across 81 executables, all green.
+The timer floor of about 46 ns is not subtracted, and values near it are unresolved. None of these is wire to wire. For Java, see [the side-by-side run](docs/JAVA_CPP_COMPARISON.md), which does not support a specific speed-up figure.
 
-Phase 5 (done): the live trading lane -- `HftMarketDataBus`
-(copy-on-write listeners, SPSC rings), `SymbolRegistry`, async tick
-capture with honest drop counting, `HftOrderGateway`,
-`ShardedTradingEngine`, `GlobalRiskAggregator` (hysteretic breaker),
-`HftQuoter`/`AutoHedger`, `PaperTradingGateway`, `SignalEngine`; the
-full `execution/` package (TWAP/VWAP/POV/IS schedulers, SOR + adaptive
-routing, dark-pool MEQ dry-run, BenchmarkExecutor, PortfolioExecutor);
-and `persist/Checkpoint` byte-identical to the Java/Python format --
-a checkpoint written by Python restores in C++ (pinned by test).
-The deterministic 1M-op soak asserts exact conservation
-(processed == submitted == delivered); tick-to-strategy through the
-real bus measures p50 228 ns (Java baseline 204 ns).
+## Known gaps
 
-**Measured nanosecond benchmarks** (`benchmarks/ull_bench.cpp`, medians
-on an unpinned Windows box -- the binary prints its own caveats):
-gate check 2.7 ns/op (Java ~3 ns), book mixed add/cancel 49.5 ns/op
-(Java ~204 ns), ring publish-to-consume p50 98 ns (Java 204 ns),
-tick-to-order composite p50 47 ns (Java p50 504 ns). The zero-allocation
-claim is enforced by a counting `operator new` hook over a million
-steady-state operations.
-
-**Cross-port verified**: an identical probe battery runs against Java,
-C++, and Python (156 labels) and diffs to zero mismatches -- the harness
-lives in the Python repo at `tools/crossport/`.
-
-Phase 4 (done): `fix/` -- the full FIX 4.4 engine (codec, incremental
-framer with the zombie-session guard, garbage-free encoder/view,
-initiator/acceptor session over sockets with resend recovery and
-ResetSeqNumFlag, durable session store); `marketdata/` + `sbe/` --
-ITCH codec, L3 book builder with exact queue position, NBBO, byte-exact
-SBE flyweights; `data/` QFLT tick files.
-
-**New to the codebase?** Start with [docs/LEARN.md](docs/LEARN.md) --
-a guided tour with compiled-and-run snippets, five worked experiments
-(including the benchmark run), and pointers into the Java repo's
-teaching material (1000 exercises, 300 recipes, 100 diagrams -- the
-concepts transfer 1:1, only syntax differs).
-
-Remaining (deliberate): WebSocket feeds, the HTML dashboard, CLI and
-report generators -- JVM-app conveniences, not library logic.
+- No TLS, no OrderStatusRequest, ExecID history not persisted, `OrderThrottle` not wired, and nothing joins ITCH or MoldUDP64 to the bus.
+- A standalone gate gets no automatic reference price, and a bad but finite tick can move the collar.
+- Not done in maths: dated legs, Jacobian risk, SVI surface, GJR and EGARCH MLE.
+- `LiquiditySeekingAlgo` and `LpRouter` are not wired to guarded routing. Portfolio backtests have no dividends or membership gating.
+- `backtest` and `execution` include each other.
 
 ## Build and test
 
 ```bash
-cmake -S . -B build -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-Any C++20 compiler works; developed against GCC 16 (MinGW-w64) and
-CMake 4.4. New sources are picked up by glob -- add files, not build
-script edits.
+Linux with GCC or Clang is the main platform; MinGW is tested in CI. Benchmarks use GCC builtins and do not build on MSVC.
+
+MIT licensed.
