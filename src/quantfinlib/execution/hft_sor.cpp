@@ -1,5 +1,7 @@
 #include "quantfinlib/execution/hft_sor.hpp"
 
+#include "quantfinlib/execution/venue_quote.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -21,6 +23,7 @@ HftSor::HftSor(int venueCount) : venues_(venueCount) {
     askTick_.assign(static_cast<std::size_t>(venueCount), NO_ASK);
     askSize_.assign(static_cast<std::size_t>(venueCount), 0);
     feeTicks_.assign(static_cast<std::size_t>(venueCount), 0.0);
+    stampNanos_.assign(static_cast<std::size_t>(venueCount), std::numeric_limits<std::int64_t>::max());
 }
 
 void HftSor::fee(int venue, double takerFeeTicks) {
@@ -34,6 +37,13 @@ void HftSor::venueQuote(int venue, std::int32_t bid, std::int64_t bidSz, std::in
     bidSize_[v] = bidSz > 0 ? bidSz : 0;
     askTick_[v] = askSz > 0 ? ask : NO_ASK;
     askSize_[v] = askSz > 0 ? askSz : 0;
+    stampNanos_[v] = std::numeric_limits<std::int64_t>::max();
+}
+
+void HftSor::venueQuote(int venue, std::int32_t bid, std::int64_t bidSz, std::int32_t ask, std::int64_t askSz,
+                        std::int64_t stampNanos) {
+    venueQuote(venue, bid, bidSz, ask, askSz);
+    stampNanos_[static_cast<std::size_t>(venue)] = stampNanos;
 }
 
 void HftSor::venueDown(int venue) {
@@ -42,6 +52,23 @@ void HftSor::venueDown(int venue) {
 
 std::int64_t HftSor::route(Side side, std::int64_t quantity, std::int32_t limitTick,
                            std::int64_t* outQty) {
+    return sweep(side, quantity, limitTick, outQty, false, 0, 0);
+}
+
+std::int64_t HftSor::route(Side side, std::int64_t quantity, std::int32_t limitTick, std::int64_t* outQty,
+                           std::int64_t nowNanos, std::int64_t maxQuoteAgeNanos) {
+    constexpr std::int32_t PURE_BUY = std::numeric_limits<std::int32_t>::max();
+    constexpr std::int32_t PURE_SELL = std::numeric_limits<std::int32_t>::min();
+    if (limitTick == (side == Side::BUY ? PURE_BUY : PURE_SELL) || maxQuoteAgeNanos < 0
+        || maxQuoteAgeNanos == std::numeric_limits<std::int64_t>::max()) {
+        std::fill(outQty, outQty + venues_, 0);
+        return 0;
+    }
+    return sweep(side, quantity, limitTick, outQty, true, nowNanos, maxQuoteAgeNanos);
+}
+
+std::int64_t HftSor::sweep(Side side, std::int64_t quantity, std::int32_t limitTick, std::int64_t* outQty,
+                           bool checkAge, std::int64_t nowNanos, std::int64_t maxQuoteAgeNanos) {
     std::fill(outQty, outQty + venues_, 0);
     routeCount_++;
     std::int64_t remaining = quantity;
@@ -58,7 +85,8 @@ std::int64_t HftSor::route(Side side, std::int64_t quantity, std::int32_t limitT
             std::int64_t sz = buy ? askSize_[static_cast<std::size_t>(v)] : bidSize_[static_cast<std::size_t>(v)];
             if (sz <= 0 || px <= 0 || px == (buy ? NO_ASK : NO_BID)
                 || (buy ? px > limitTick : px < limitTick)
-                || !std::isfinite(feeTicks_[static_cast<std::size_t>(v)])) {
+                || !std::isfinite(feeTicks_[static_cast<std::size_t>(v)])
+                || (checkAge && stampIsStale(stampNanos_[static_cast<std::size_t>(v)], nowNanos, maxQuoteAgeNanos))) {
                 continue;
             }
             double allIn = buy ? px + feeTicks_[static_cast<std::size_t>(v)] : px - feeTicks_[static_cast<std::size_t>(v)];

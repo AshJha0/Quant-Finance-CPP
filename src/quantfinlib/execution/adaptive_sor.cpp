@@ -56,15 +56,29 @@ struct Scored {
 }  // namespace
 
 AdaptiveSor::RoutingDecision AdaptiveSor::route(Side side, std::int64_t quantity,
+                                                const std::vector<VenueQuote>& venues,
+                                                const smart_order_router::RouteGuard& guard) {
+    smart_order_router::requireGuard(guard);
+    return routeChecked(side, quantity, venues, guard.limitPrice, guard.nowNanos, guard.maxQuoteAgeNanos);
+}
+
+AdaptiveSor::RoutingDecision AdaptiveSor::route(Side side, std::int64_t quantity,
                                                 const std::vector<VenueQuote>& venues) {
-    return route(side, quantity, venues, smart_order_router::marketLimit(side), 0,
-                 std::numeric_limits<std::int64_t>::max());
+    return routeChecked(side, quantity, venues, smart_order_router::marketLimit(side), 0,
+                        std::numeric_limits<std::int64_t>::max());
 }
 
 AdaptiveSor::RoutingDecision AdaptiveSor::route(Side side, std::int64_t quantity,
                                                 const std::vector<VenueQuote>& venues,
                                                 double limitPrice, std::int64_t nowNanos,
                                                 std::int64_t maxQuoteAgeNanos) {
+    return routeChecked(side, quantity, venues, limitPrice, nowNanos, maxQuoteAgeNanos);
+}
+
+AdaptiveSor::RoutingDecision AdaptiveSor::routeChecked(Side side, std::int64_t quantity,
+                                                       const std::vector<VenueQuote>& venues,
+                                                       double limitPrice, std::int64_t nowNanos,
+                                                       std::int64_t maxQuoteAgeNanos) {
     smart_order_router::requireRouteArguments(limitPrice, maxQuoteAgeNanos);
     bool buy = side == Side::BUY;
     std::vector<smart_order_router::RouteLeg> lit;
@@ -88,7 +102,7 @@ AdaptiveSor::RoutingDecision AdaptiveSor::route(Side side, std::int64_t quantity
         }
         double px = buy ? v.ask : v.bid;
         std::int64_t size = buy ? v.askSize : v.bidSize;
-        if (size <= 0 || !smart_order_router::isDealable(side, px, limitPrice)) {
+        if (size <= 0 || !smart_order_router::isDealable(side, px, limitPrice) || !std::isfinite(v.feeBps)) {
             continue;
         }
         double fillRate = id != nullptr ? scorecard_.fillRate(*id) : scorecard_.fillRatePrior();

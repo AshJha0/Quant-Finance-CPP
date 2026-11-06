@@ -866,8 +866,8 @@ TEST(throwingListenerLatchesInsteadOfTerminating) {
 // ---- paper gateway -------------------------------------------------------
 
 TEST(paperGatewayValidatesWithoutAGate) {
-    PaperTradingGateway gw(1000.0);
-    gw.onQuote("X", 99.0, 101.0);
+    auto gw = PaperTradingGateway::unsafeWithoutRiskGate(1000.0, 0, PaperTradingGateway::FillConfig::zeroLatency());
+    gw.onQuote("X", 1, 99.0, 1000, 101.0, 1000);
     EXPECT_TRUE(gw.status(gw.submitMarket("X", Side::BUY, 0)) == OrderStatus::REJECTED);
     EXPECT_TRUE(gw.status(gw.submitMarket("X", Side::BUY, -5)) == OrderStatus::REJECTED);
     EXPECT_TRUE(gw.status(gw.submitLimit("X", Side::BUY, -5, 100.0)) == OrderStatus::REJECTED);
@@ -875,8 +875,8 @@ TEST(paperGatewayValidatesWithoutAGate) {
     EXPECT_TRUE(gw.status(gw.submitLimit("X", Side::BUY, 5, -1.0)) == OrderStatus::REJECTED);
     EXPECT_TRUE(gw.position("X") == 0);
     EXPECT_TRUE(gw.snapshot().rejectionCount == 5);
-    gw.onQuote("X", NaN, 101.0);    // ignored: the last good quote stands
-    gw.onQuote("X", 102.0, 101.0);  // crossed
+    gw.onQuote("X", 2, NaN, 1000, 101.0, 1000);  // ignored: the last good quote stands
+    gw.onQuote("X", 3, 102.0, 1000, 101.0, 1000);  // crossed
     EXPECT_TRUE(gw.snapshot().rejectionCount == 7);
     EXPECT_TRUE(gw.status(gw.submitMarket("X", Side::BUY, 1)) == OrderStatus::FILLED);
 }
@@ -884,16 +884,19 @@ TEST(paperGatewayValidatesWithoutAGate) {
 TEST(paperGatewayCallsTheRealGate) {
     HftRiskGate gate(2);
     gate.maxOrderQuantity(100).maxOrderNotional(1e6).maxPositionQuantity(100).priceCollarPct(0.05);
-    PaperTradingGateway gw(1e6);
-    gw.attachRiskGate(gate, {{"X", 0}});
-    gw.onQuote("X", 99.0, 101.0);
+    PaperTradingGateway gw(1e6, 0, gate, {{"X", 0}}, PaperTradingGateway::FillConfig::zeroLatency());
+    std::int64_t nanos = 0;
+    auto quote = [&](const char* symbol, double bid, double ask) {
+        gw.onQuote(symbol, ++nanos, bid, 1000000, ask, 1000000);
+    };
+    quote("X", 99.0, 101.0);
     EXPECT_TRUE(gate.referencePrice(0) == 100.0);
 
     // Limits.
     EXPECT_TRUE(gw.status(gw.submitMarket("X", Side::BUY, 101)) == OrderStatus::REJECTED);
     EXPECT_TRUE(gw.status(gw.submitLimit("X", Side::BUY, 1, 50.0)) == OrderStatus::REJECTED);
     // Unmapped symbol.
-    gw.onQuote("Y", 99.0, 101.0);
+    quote("Y", 99.0, 101.0);
     EXPECT_TRUE(gw.status(gw.submitMarket("Y", Side::BUY, 1)) == OrderStatus::REJECTED);
 
     // A resting order holds its reservation; cancel returns it.

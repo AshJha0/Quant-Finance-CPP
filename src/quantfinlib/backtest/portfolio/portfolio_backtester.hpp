@@ -6,16 +6,16 @@
 // bar t+1's open unless fillTiming says otherwise, each trade capped at
 // maxParticipationRate of the bar's volume. Shorts pay borrow and a cash
 // debit pays financing, accrued per bar. Delistings close at the recorded
-// delisting return. This is where the optimization stack
+// delisting return and mergers convert at the deal terms on the effective bar
+// (backtest/corporate_actions.hpp, shared with the alpha engine). This is where the optimization stack
 // meets the backtester — feed optimizer weights, vol-target overlays,
 // or momentum rankings straight in.
 //
-// PORT SCOPE: the Java survivorship-aware overload (PointInTimeUniverse
-// membership, mergers/index drops, cash dividends) is NOT ported; only
-// Config::delistings is. Otherwise every supplied symbol is tradeable on
-// every bar. The Result fields
-// populated only by that overload (dividendCashCredited,
-// lifecycleEventsApplied) are omitted. Gates map to
+// PORT SCOPE: of the Java survivorship-aware overload, terminal events are
+// ported (Config::delistings, Config::mergers, and Config::universe's events).
+// Universe membership gating, index drops and cash dividends are NOT: apart
+// from terminal events every supplied symbol is tradeable on every bar.
+// dividendCashCredited is omitted. Gates map to
 // std::invalid_argument.
 #pragma once
 
@@ -24,6 +24,7 @@
 #include <vector>
 
 #include "quantfinlib/backtest/backtest_config.hpp"
+#include "quantfinlib/backtest/corporate_actions.hpp"
 #include "quantfinlib/backtest/delisting.hpp"
 #include "quantfinlib/backtest/performance_metrics.hpp"
 #include "quantfinlib/backtest/portfolio/portfolio_strategy.hpp"
@@ -52,6 +53,9 @@ struct Config {
     double borrowRateAnnual = 0.005;     // on short market value
     double financingRateAnnual = 0.05;   // on a negative cash balance
     std::vector<Delisting> delistings;
+    std::vector<Merger> mergers;
+    // Terminal events only; not owned, must outlive run(). nullptr = none.
+    const PointInTimeUniverse* universe = nullptr;
 
     static Config defaults() {
         Config c;
@@ -97,6 +101,7 @@ struct Result {
     std::map<std::string, double> finalPositions;
     double totalBorrowCost = 0;
     double totalFinancingCost = 0;
+    int lifecycleEventsApplied = 0;  // delistings and mergers that hit a held position
 };
 
 /** Classic run: every supplied symbol is tradeable on every bar. */

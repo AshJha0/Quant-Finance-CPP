@@ -29,14 +29,7 @@ bool isStale(const VenueQuote& quote, std::int64_t nowNanos, std::int64_t maxQuo
     if (maxQuoteAgeNanos == DISABLED) {
         return false;
     }
-    if (quote.lastUpdateNanos == std::numeric_limits<std::int64_t>::max()
-        || quote.lastUpdateNanos > nowNanos) {
-        return true;
-    }
-    // Compared as a bound on the stamp: nowNanos - stamp can overflow.
-    return quote.lastUpdateNanos < nowNanos
-            && static_cast<std::uint64_t>(nowNanos) - static_cast<std::uint64_t>(quote.lastUpdateNanos)
-                    > static_cast<std::uint64_t>(maxQuoteAgeNanos);
+    return stampIsStale(quote.lastUpdateNanos, nowNanos, maxQuoteAgeNanos);
 }
 
 bool isDealable(Side side, double price, double limitPrice) {
@@ -55,13 +48,43 @@ void requireRouteArguments(double limitPrice, std::int64_t maxQuoteAgeNanos) {
     }
 }
 
+void requireGuard(const RouteGuard& guard) {
+    if (!(guard.limitPrice > 0) || !std::isfinite(guard.limitPrice)) {
+        throw std::invalid_argument("a live route needs a finite limit price");
+    }
+    if (guard.maxQuoteAgeNanos < 0 || guard.maxQuoteAgeNanos == std::numeric_limits<std::int64_t>::max()) {
+        throw std::invalid_argument("a live route needs a real maximum quote age");
+    }
+}
+
+namespace {
+
+RoutingPlan routeChecked(Side side, std::int64_t quantity, const std::vector<VenueQuote>& venues,
+                         bool preferDark, const RouteOptions& options);
+
+}  // namespace
+
+RoutingPlan route(Side side, std::int64_t quantity, const std::vector<VenueQuote>& venues, bool preferDark,
+                  const RouteGuard& guard) {
+    requireGuard(guard);
+    RouteOptions options;
+    options.limitPrice = guard.limitPrice;
+    options.nowNanos = guard.nowNanos;
+    options.maxQuoteAgeNanos = guard.maxQuoteAgeNanos;
+    return routeChecked(side, quantity, venues, preferDark, options);
+}
+
 RoutingPlan route(Side side, std::int64_t quantity, const std::vector<VenueQuote>& venues, bool preferDark) {
-    return route(side, quantity, venues, preferDark, marketLimit(side));
+    RouteOptions options;
+    options.limitPrice = marketLimit(side);
+    return routeChecked(side, quantity, venues, preferDark, options);
 }
 
 RoutingPlan route(Side side, std::int64_t quantity, const std::vector<VenueQuote>& venues, bool preferDark,
                   double limitPrice) {
-    return route(side, quantity, venues, preferDark, limitPrice, 0, std::numeric_limits<std::int64_t>::max());
+    RouteOptions options;
+    options.limitPrice = limitPrice;
+    return routeChecked(side, quantity, venues, preferDark, options);
 }
 
 RoutingPlan route(Side side, std::int64_t quantity, const std::vector<VenueQuote>& venues, bool preferDark,
@@ -70,11 +93,18 @@ RoutingPlan route(Side side, std::int64_t quantity, const std::vector<VenueQuote
     options.limitPrice = limitPrice;
     options.nowNanos = nowNanos;
     options.maxQuoteAgeNanos = maxQuoteAgeNanos;
-    return route(side, quantity, venues, preferDark, options);
+    return routeChecked(side, quantity, venues, preferDark, options);
 }
 
 RoutingPlan route(Side side, std::int64_t quantity, const std::vector<VenueQuote>& venues, bool preferDark,
                   const RouteOptions& options) {
+    return routeChecked(side, quantity, venues, preferDark, options);
+}
+
+namespace {
+
+RoutingPlan routeChecked(Side side, std::int64_t quantity, const std::vector<VenueQuote>& venues,
+                         bool preferDark, const RouteOptions& options) {
     if (quantity < 0) {
         throw std::invalid_argument("quantity must be >= 0");
     }
@@ -151,6 +181,8 @@ RoutingPlan route(Side side, std::int64_t quantity, const std::vector<VenueQuote
     std::int64_t routed = quantity - remaining;
     return RoutingPlan{legs, routed, remaining, routed == 0 ? std::nan("") : allInNotional / routed};
 }
+
+}  // namespace
 
 }  // namespace smart_order_router
 }  // namespace quantfinlib

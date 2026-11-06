@@ -1,6 +1,9 @@
 // Execution and central risk book behaviour that must fail closed: in-flight
 // accounting, horizon completion, lots, router eligibility, dark MEQ, quoting
 // on bad inputs, CRB re-marks and currency conversion.
+// Pins the deprecated research overloads as well as the guarded ones.
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+
 #include <cmath>
 #include <cstdint>
 #include <limits>

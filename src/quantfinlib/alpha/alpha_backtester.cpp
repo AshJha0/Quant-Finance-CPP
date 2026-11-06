@@ -53,34 +53,6 @@ double impactBps(const AlphaContext& ctx, int symbol, int index, double tradedFr
     return impact->squareRootImpactBps(shares);
 }
 
-/** (bar, delisting return) per symbol index; bar -1 = none. */
-std::vector<std::pair<int, double>> delistingSchedule(const AlphaContext& ctx, const Config& config) {
-    std::vector<std::pair<int, double>> out(static_cast<std::size_t>(ctx.symbolCount()),
-                                            {-1, 0.0});
-    const PointInTimeUniverse* universe = ctx.universe();
-    for (int i = 0; universe != nullptr && i < ctx.symbolCount(); i++) {
-        const auto* event = universe->terminalEvent(ctx.symbols()[static_cast<std::size_t>(i)]);
-        if (event == nullptr || event->type != PointInTimeUniverse::EventType::DELISTING) {
-            continue;
-        }
-        for (int t = 1; t < ctx.bars(); t++) {
-            if (ctx.timestamp(t) >= event->timestamp) {
-                out[static_cast<std::size_t>(i)] = {t, event->delistingReturn};
-                break;
-            }
-        }
-    }
-    for (const Delisting& d : config.delistings) {
-        auto it = std::find(ctx.symbols().begin(), ctx.symbols().end(), d.symbol);
-        if (it == ctx.symbols().end() || d.barIndex < 1 || d.barIndex >= ctx.bars()
-            || !std::isfinite(d.delistingReturn) || d.delistingReturn < -1) {
-            throw std::invalid_argument("invalid delisting for " + d.symbol);
-        }
-        out[static_cast<std::size_t>(it - ctx.symbols().begin())] = {d.barIndex, d.delistingReturn};
-    }
-    return out;
-}
-
 }  // namespace
 
 Result run(const AlphaContext& ctx, const AlphaFactor& factor, const Config& config) {
@@ -117,28 +89,50 @@ Result run(const AlphaContext& ctx, const AlphaFactor& factor, const Config& con
     int rebalances = 0;
 
     const bool sameBar = config.fillTiming == FillTiming::SAME_BAR_CLOSE;
-    const auto delistings = delistingSchedule(ctx, config);
-    constexpr int NO_DELISTING = -2;  // matches no bar, nor the schedule's -1 for "none"
+    std::vector<std::int64_t> timestamps(static_cast<std::size_t>(n));
+    for (int t = 0; t < n; t++) {
+        timestamps[static_cast<std::size_t>(t)] = ctx.timestamp(t);
+    }
+    const auto actions = corporate_actions::schedule(ctx.symbols(), timestamps, ctx.universe(),
+                                                     config.delistings, config.mergers);
+    constexpr int NO_EVENT = -2;  // matches no bar, nor the schedule's -1 for "none"
     std::vector<char> volumeKnown(static_cast<std::size_t>(m), 0);
     for (int i = 0; i < m; i++) {
         volumeKnown[static_cast<std::size_t>(i)] = volume_cap::hasVolumeData(ctx.series(i));
     }
 
-    // Moves the book through one price leg. Weights are fractions of
-    // equity, so they drift; the rest of the book is cash at zero return.
-    // A name delisting at bar `delistBar` pays its delisting return and
-    // turns into cash. Returns the book's
-    // growth factor.
-    auto drift = [&](int delistBar, const std::function<double(int)>& simpleReturn) {
+    // Moves the book through one price leg that starts from bar `prevBar`'s
+    // price. Weights are fractions of equity, so they drift; the rest of the
+    // book is cash at zero return. A name whose terminal event falls on
+    // `eventBar` pays its delisting return, or converts at the deal terms: the
+    // cash leg leaves the book and the stock leg becomes acquirer weight,
+    // valued at the acquirer's price at the end of this leg. Returns the
+    // book's growth factor.
+    auto drift = [&](int eventBar, int prevBar, const std::function<double(int)>& simpleReturn) {
         std::vector<double> returns(static_cast<std::size_t>(m), 0.0);
+        std::vector<double> stockLeg(static_cast<std::size_t>(m), 0.0);
         double portfolioReturn = 0;
         for (int i = 0; i < m; i++) {
             auto idx = static_cast<std::size_t>(i);
             if (weights[idx] == 0) {
                 continue;
             }
-            returns[idx] = delistings[idx].first == delistBar ? delistings[idx].second
-                                                              : simpleReturn(i);
+            const corporate_actions::TerminalAction& action = actions[idx];
+            if (action.bar != eventBar) {
+                returns[idx] = simpleReturn(i);
+            } else if (!action.merger) {
+                returns[idx] = action.delistingReturn;
+            } else {
+                double lastClose = ctx.series(i).close(prevBar);
+                double stockValue = 0;
+                if (action.acquirerSharesPerShare > 0) {
+                    int a = action.acquirerIndex;
+                    stockValue = action.acquirerSharesPerShare * ctx.series(a).close(prevBar)
+                            * (1 + simpleReturn(a));
+                    stockLeg[static_cast<std::size_t>(a)] += weights[idx] * stockValue / lastClose;
+                }
+                returns[idx] = (action.cashPerShare + stockValue) / lastClose - 1;
+            }
             portfolioReturn += weights[idx] * returns[idx];
         }
         double growth = 1 + portfolioReturn;
@@ -147,9 +141,9 @@ Result run(const AlphaContext& ctx, const AlphaFactor& factor, const Config& con
         }
         for (int i = 0; i < m; i++) {
             auto idx = static_cast<std::size_t>(i);
-            weights[idx] = delistings[idx].first == delistBar
+            weights[idx] = actions[idx].bar == eventBar
                     ? 0
-                    : weights[idx] * (1 + returns[idx]) / growth;
+                    : (weights[idx] * (1 + returns[idx]) + stockLeg[idx]) / growth;
         }
         return growth;
     };
@@ -166,7 +160,7 @@ Result run(const AlphaContext& ctx, const AlphaFactor& factor, const Config& con
         double impact = 0;
         for (int i = 0; i < m; i++) {
             auto idx = static_cast<std::size_t>(i);
-            bool gone = delistings[idx].first >= 0 && execBar >= delistings[idx].first;
+            bool gone = actions[idx].goneBy(execBar);
             double wanted = (gone ? 0.0 : target[idx]) - weights[idx];
             double traded = std::abs(wanted);
             if (traded == 0) {
@@ -234,16 +228,16 @@ Result run(const AlphaContext& ctx, const AlphaFactor& factor, const Config& con
             if (due) {
                 costFactor = rebalance(target, t, t, false, equityNow);
             }
-            growth = drift(t + 1, [&](int i) { return ctx.returnOver(i, t, t + 1); });
+            growth = drift(t + 1, t, [&](int i) { return ctx.returnOver(i, t, t + 1); });
         } else {
-            growth = drift(t + 1, [&](int i) {
+            growth = drift(t + 1, t, [&](int i) {
                 const BarSeries& s = ctx.series(i);
                 return s.open(t + 1) / s.close(t) - 1;
             });
             if (due) {
                 costFactor = rebalance(target, t, t + 1, true, equityNow * growth);
             }
-            growth *= drift(NO_DELISTING, [&](int i) {
+            growth *= drift(NO_EVENT, t + 1, [&](int i) {
                 const BarSeries& s = ctx.series(i);
                 return s.close(t + 1) / s.open(t + 1) - 1;
             });

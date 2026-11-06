@@ -9,6 +9,11 @@
 // costs latencyBpsPerMs in the ranking; lit legs execute in displayed-price
 // order, so a low fee cannot route through a better displayed quote (Reg NMS
 // Rule 611 in spirit); fees then rank venues showing the same price.
+//
+// Live code routes with a RouteGuard, normally through ChildOrderRouter. The
+// guard has no defaults and no "off" value: a limit and a quote age are
+// required, and a quote of unknown age gets nothing. The overloads without a
+// guard can route blind, so they are deprecated and kept for research only.
 #pragma once
 
 #include <cstdint>
@@ -52,6 +57,16 @@ void requireRouteArguments(double limitPrice, std::int64_t maxQuoteAgeNanos);
 /** The limit that means "pure market" for this side. */
 double marketLimit(Side side);
 
+/** The checks every live route must carry. Nothing here has a default on purpose. */
+struct RouteGuard {
+    double limitPrice;              // worst acceptable raw (pre-fee) price
+    std::int64_t nowNanos;          // same clock as VenueQuote::lastUpdateNanos
+    std::int64_t maxQuoteAgeNanos;  // older, unstamped or future quotes are skipped
+};
+
+/** Throws unless the limit is a real price and the age bound is a real bound. */
+void requireGuard(const RouteGuard& guard);
+
 /** Everything the router can be told beyond the order itself. */
 struct RouteOptions {
     double limitPrice;                 // use marketLimit(side) for none
@@ -61,6 +76,11 @@ struct RouteOptions {
     bool allowTradeThrough = false;    // true restores pure all-in ordering of lit venues
 };
 
+/** The live entry point. @throws std::invalid_argument on a guard requireGuard refuses. */
+RoutingPlan route(Side side, std::int64_t quantity, const std::vector<VenueQuote>& venues, bool preferDark,
+                  const RouteGuard& guard);
+
+[[deprecated("routes with no limit and no staleness check; live code passes a RouteGuard")]]
 RoutingPlan route(Side side, std::int64_t quantity, const std::vector<VenueQuote>& venues, bool preferDark);
 
 /**
@@ -71,6 +91,7 @@ RoutingPlan route(Side side, std::int64_t quantity, const std::vector<VenueQuote
  * @param limitPrice worst acceptable raw (pre-fee) price; pass
  *                    +infinity (buy) / -infinity (sell) for pure market
  */
+[[deprecated("no staleness check; live code passes a RouteGuard")]]
 RoutingPlan route(Side side, std::int64_t quantity, const std::vector<VenueQuote>& venues, bool preferDark,
                   double limitPrice);
 
@@ -86,9 +107,11 @@ RoutingPlan route(Side side, std::int64_t quantity, const std::vector<VenueQuote
  *                         or its stamp is unset or in the future;
  *                         pass INT64_MAX to disable the staleness check
  */
+[[deprecated("the age bound can be switched off here; live code passes a RouteGuard")]]
 RoutingPlan route(Side side, std::int64_t quantity, const std::vector<VenueQuote>& venues, bool preferDark,
                   double limitPrice, std::int64_t nowNanos, std::int64_t maxQuoteAgeNanos);
 
+[[deprecated("options default to no staleness check; live code passes a RouteGuard")]]
 RoutingPlan route(Side side, std::int64_t quantity, const std::vector<VenueQuote>& venues, bool preferDark,
                   const RouteOptions& options);
 
