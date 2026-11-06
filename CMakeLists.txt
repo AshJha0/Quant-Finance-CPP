@@ -27,6 +27,10 @@ endif()
 # One test executable per tests/*_test.cpp, registered with CTest.
 enable_testing()
 file(GLOB QFL_TESTS CONFIGURE_DEPENDS tests/*_test.cpp)
+# The allocation test replaces operator new, which TSan also defines.
+if(CMAKE_CXX_FLAGS MATCHES "fsanitize=thread")
+    list(FILTER QFL_TESTS EXCLUDE REGEX "ull_allocation_test")
+endif()
 foreach(test_src ${QFL_TESTS})
     get_filename_component(test_name ${test_src} NAME_WE)
     add_executable(${test_name} ${test_src})

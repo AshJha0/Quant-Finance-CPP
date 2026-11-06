@@ -290,6 +290,8 @@ TEST(vpinImbalanceIsAbsoluteSoSellingCountsLikeBuying) {
 TEST(autoHedgerSendsTheExcessOverTheBandNotTheWholePosition) {
     HftRiskGate gate(2);
     gate.maxOrderQuantity(10000).maxOrderNotional(1e9).maxPositionQuantity(1000000);
+    gate.priceCollarPct(0.5);
+    gate.setReferencePrice(0, 100.0);
     HftOrderGateway gw(gate);
     std::atomic<std::int64_t> qty{0};
     gw.addOrderListener([&qty](std::int64_t, int, Side, std::int64_t q, double, std::int64_t) {
