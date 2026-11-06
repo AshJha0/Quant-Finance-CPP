@@ -33,12 +33,22 @@ public:
          */
         Builder& forward(double expiryYears, double forwardValue);
 
+        /**
+         * Opt-in: build() throws std::invalid_argument on calendar arbitrage
+         * (scanned on gridPoints) and, for expiries with a forward, on
+         * butterfly arbitrage between quoted strikes: undiscounted call
+         * prices must be decreasing and convex across the pillars. Pillars are
+         * tested rather than the interpolated smile, whose kinks are artefacts.
+         */
+        Builder& rejectArbitrage(int gridPoints = 41);
+
         /** Throws std::runtime_error (Java IllegalStateException) when empty. */
         VolSurface build() const;
 
     private:
         std::map<double, std::map<double, double>> smiles_;
         std::map<double, double> forwards_;
+        int arbitrageGrid_ = 0;  // 0 = no check at build
     };
 
     /** Total variance falls between two expiries at this log-moneyness. */

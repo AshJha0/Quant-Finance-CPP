@@ -50,6 +50,14 @@ VolSurface::Builder& VolSurface::Builder::forward(double expiryYears, double for
     return *this;
 }
 
+VolSurface::Builder& VolSurface::Builder::rejectArbitrage(int gridPoints) {
+    if (gridPoints < 2) {
+        throw std::invalid_argument("gridPoints must be >= 2");
+    }
+    arbitrageGrid_ = gridPoints;
+    return *this;
+}
+
 VolSurface VolSurface::Builder::build() const {
     if (smiles_.empty()) {
         throw std::runtime_error("no pillar quotes");
@@ -65,7 +73,30 @@ VolSurface VolSurface::Builder::build() const {
             throw std::invalid_argument("forwards must be given for exactly the quoted expiries");
         }
     }
-    return VolSurface(smiles_, forwards_);
+    VolSurface surface(smiles_, forwards_);
+    if (arbitrageGrid_ > 0) {
+        if (!surface.calendarViolations(arbitrageGrid_).empty()) {
+            throw std::invalid_argument("surface has calendar arbitrage");
+        }
+        for (const auto& [t, f] : forwards_) {
+            double prevK = 0;
+            double prevC = f;      // C(0) = F
+            double prevSlope = -1; // call slope is at least -1
+            for (const auto& [k, v] : smiles_.at(t)) {
+                double c = black76::price(OptionType::CALL, f, k, 0, v, t);
+                double slope = (c - prevC) / (k - prevK);
+                if (slope < prevSlope - 1e-12 || slope > 1e-12) {
+                    throw std::invalid_argument("surface has butterfly arbitrage at expiry "
+                                                + std::to_string(t) + " strike "
+                                                + std::to_string(k));
+                }
+                prevK = k;
+                prevC = c;
+                prevSlope = slope;
+            }
+        }
+    }
+    return surface;
 }
 
 double VolSurface::vol(double expiryYears, double strike) const {
