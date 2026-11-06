@@ -55,7 +55,7 @@ FxVolSurface::Builder& FxVolSurface::Builder::add(double expiryYears, double for
 FxVolSurface::Builder& FxVolSurface::Builder::add(double expiryYears, double forward,
                                                   double atmVol, double rr25, double bf25,
                                                   double rr10, double bf10) {
-    if (expiryYears <= 0 || forward <= 0 || atmVol <= 0) {
+    if (!(expiryYears > 0) || !(forward > 0) || !(atmVol > 0)) {
         throw std::invalid_argument("expiry, forward and atm vol must be > 0");
     }
     bool tenDelta = !std::isnan(rr10);
@@ -237,7 +237,7 @@ double FxVolSurface::smileVol(int i, double x) const {
 }
 
 double FxVolSurface::vol(double expiryYears, double strike) const {
-    if (strike <= 0) {
+    if (!(strike > 0)) {
         throw std::invalid_argument("strike must be > 0: " + std::to_string(strike));
     }
     int n = static_cast<int>(expiries_.size());

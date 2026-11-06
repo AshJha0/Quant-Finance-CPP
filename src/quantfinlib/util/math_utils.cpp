@@ -18,6 +18,19 @@ const double kLn2 = std::log(2.0);
 // Java's Math.PI (M_PI is a non-standard extension; pin the same double).
 constexpr double kPi = 3.141592653589793;
 
+// Cody's coefficients, with the digits SPECFUN ANORM publishes so they can be
+// checked against the source.
+constexpr double kInvSqrt2Pi = 0.398942280401432677939946059934;
+constexpr double kCodyA[] = {2.2352520354606839287, 161.02823106855587881, 1067.6894854603709582, 18154.981253343561249, 0.065682337918207449113};
+constexpr double kCodyB[] = {47.20258190468824187, 976.09855173777669322, 10260.932208618978205, 45507.789335026729956};
+constexpr double kCodyC[] = {0.39894151208813466764, 8.8831497943883759412, 93.506656132177855979, 597.27027639480026226, 2494.5375852903726711, 6848.1904505362823326, 11602.651437647350124, 9842.7148383839780218, 1.0765576773720192317e-8};
+constexpr double kCodyD[] = {22.266688044328115691, 235.38790178262499861, 1519.377599407554805, 6485.558298266760755, 18615.571640885098091, 34900.952721145977266, 38912.003286093271411, 19685.429676859990727};
+constexpr double kCodyP[] = {0.21589853405795699, 0.1274011611602473639, 0.022235277870649807, 0.001421619193227893466, 2.9112874951168792e-5, 0.02307344176494017303};
+constexpr double kCodyQ[] = {1.28426009614491121, 0.468238212480865118, 0.0659881378689285515, 0.00378239633202758244, 7.29751555083966205e-5};
+
+// Acklam's rational approximation, |relative error| < 1.15e-9, before refinement.
+double normInvAcklam(double p);
+
 void swapPair(std::vector<double>& k, std::vector<int>& v, int a, int b) {
     double tk = k[a];
     k[a] = k[b];
@@ -258,15 +271,30 @@ double correlation(const std::vector<double>& a, const std::vector<double>& b) {
     return covariance(a, b) / (sa * sb);
 }
 
-Matrix cholesky(const Matrix& a) {
+namespace {
+
+double maxDiagonal(const Matrix& a) {
     int n = static_cast<int>(a.size());
     double maxDiag = 0;
     for (int i = 0; i < n; i++) {
+        if (static_cast<int>(a[i].size()) != n) {
+            throw std::invalid_argument("matrix must be square");
+        }
+        for (double v : a[i]) {
+            if (!std::isfinite(v)) {
+                throw std::invalid_argument("matrix entries must be finite");
+            }
+        }
         maxDiag = std::max(maxDiag, std::fabs(a[i][i]));
     }
-    // Java's Double.MIN_NORMAL is the smallest positive normal double,
-    // which is std::numeric_limits<double>::min() in C++.
-    double indefinite = -1e-8 * std::max(maxDiag, std::numeric_limits<double>::min());
+    // Scale floor: the smallest positive normal double (Java's MIN_NORMAL).
+    return std::max(maxDiag, std::numeric_limits<double>::min());
+}
+
+// One factorisation for both entry points. A pivot at or below rejectAtOrBelow
+// throws; an accepted pivot at or below jitter is raised to it.
+Matrix factor(const Matrix& a, double rejectAtOrBelow, double jitter) {
+    int n = static_cast<int>(a.size());
     Matrix l(n, std::vector<double>(n, 0.0));
     for (int i = 0; i < n; i++) {
         for (int j = 0; j <= i; j++) {
@@ -275,16 +303,13 @@ Matrix cholesky(const Matrix& a) {
                 sum -= l[i][k] * l[j][k];
             }
             if (i == j) {
-                if (sum < indefinite) {
+                if (!(sum > rejectAtOrBelow)) {
                     throw std::invalid_argument(
-                            "matrix is not positive semi-definite (pivot "
+                            "matrix fails the definiteness check (pivot "
                             + std::to_string(i) + " = " + std::to_string(sum)
                             + ") - check for correlations beyond 1");
                 }
-                if (sum <= 0) {
-                    sum = 1e-12;
-                }
-                l[i][i] = std::sqrt(sum);
+                l[i][i] = std::sqrt(sum <= jitter ? jitter : sum);
             } else {
                 l[i][j] = sum / l[j][j];
             }
@@ -293,10 +318,37 @@ Matrix cholesky(const Matrix& a) {
     return l;
 }
 
+}  // namespace
+
+Matrix cholesky(const Matrix& a) {
+    double scale = maxDiagonal(a);
+    return factor(a, -1e-8 * scale, 1e-12 * scale);
+}
+
+Matrix choleskyStrict(const Matrix& a) {
+    double scale = maxDiagonal(a);
+    return factor(a, 1e-12 * scale, 0.0);
+}
+
 double normInv(double p) {
-    if (p <= 0 || p >= 1) {
+    if (!(p > 0 && p < 1)) {  // also rejects NaN
         throw std::invalid_argument("p must be in (0,1): " + std::to_string(p));
     }
+    double x = normInvAcklam(p);
+    // One Halley step against the double-precision CDF (the refinement Acklam
+    // recommends). The error is formed on the short side of 0.5 so it does
+    // not cancel in the upper tail.
+    double e = p < 0.5 ? normCdf(x) - p : (1 - p) - normCdf(-x);
+    double u = e * std::sqrt(2 * kPi) * std::exp(0.5 * x * x);
+    if (!std::isfinite(u)) {
+        return x;  // subnormal p: exp overflows, keep the unrefined root
+    }
+    return x - u / (1 + 0.5 * x * u);
+}
+
+namespace {
+
+double normInvAcklam(double p) {
     // Acklam coefficients, copied digit-for-digit from the Java source.
     static const double a[] = {-3.969683028665376e+01, 2.209460984245205e+02, -2.759285104469687e+02,
                                1.383577518672690e+02, -3.066479806614716e+01, 2.506628277459239e+00};
@@ -323,6 +375,8 @@ double normInv(double p) {
     return (((((a[0] * r + a[1]) * r + a[2]) * r + a[3]) * r + a[4]) * r + a[5]) * q
             / (((((b[0] * r + b[1]) * r + b[2]) * r + b[3]) * r + b[4]) * r + 1);
 }
+
+}  // namespace
 
 double skewness(const std::vector<double>& v) {
     double m = mean(v);
@@ -362,13 +416,60 @@ double normPdf(double x) {
 }
 
 double normCdf(double x) {
-    if (x < 0) {
-        return 1 - normCdf(-x);
+    if (std::isnan(x)) {
+        return x;
     }
-    double t = 1 / (1 + 0.2316419 * x);
-    double poly = t * (0.319381530 + t * (-0.356563782 + t * (1.781477937
-            + t * (-1.821255978 + t * 1.330274429))));
-    return 1 - normPdf(x) * poly;
+    double y = std::fabs(x);
+    if (y <= 0.67448975) {
+        double xsq = y > 1.1e-16 ? x * x : 0;
+        double xnum = kCodyA[4] * xsq, xden = xsq;
+        for (int i = 0; i < 3; i++) {
+            xnum = (xnum + kCodyA[i]) * xsq;
+            xden = (xden + kCodyB[i]) * xsq;
+        }
+        return 0.5 + x * (xnum + kCodyA[3]) / (xden + kCodyB[3]);
+    }
+    double tail;
+    if (y <= 5.656854249492380195206754896838) {  // sqrt(32)
+        double xnum = kCodyC[8] * y, xden = y;
+        for (int i = 0; i < 7; i++) {
+            xnum = (xnum + kCodyC[i]) * y;
+            xden = (xden + kCodyD[i]) * y;
+        }
+        tail = (xnum + kCodyC[7]) / (xden + kCodyD[7]);
+    } else {
+        if (y > 40) {
+            return x > 0 ? 1.0 : 0.0;
+        }
+        double xsq = 1 / (x * x);
+        double xnum = kCodyP[5] * xsq, xden = xsq;
+        for (int i = 0; i < 4; i++) {
+            xnum = (xnum + kCodyP[i]) * xsq;
+            xden = (xden + kCodyQ[i]) * xsq;
+        }
+        double t = xsq * (xnum + kCodyP[4]) / (xden + kCodyQ[4]);
+        tail = (kInvSqrt2Pi - t) / y;
+    }
+    // exp(-y^2/2) split at xs = y truncated to 1/16, so the exponent carries
+    // no rounding error and the lower tail keeps its relative accuracy.
+    double xs = std::floor(y * 16) / 16;
+    double del = (y - xs) * (y + xs);
+    double lower = std::exp(-xs * xs * 0.5) * std::exp(-del * 0.5) * tail;
+    return x > 0 ? 1 - lower : lower;
+}
+
+double expTimesNormCdf(double a, double x) {
+    if (x > -37) {
+        return std::exp(a) * normCdf(x);
+    }
+    // Phi(x) = phi(u) R(u), u = -x, with the asymptotic Mills ratio; below
+    // -37 the truncation error is under 1e-12 relative. Folding a into the
+    // exponent keeps a finite product finite when exp(a) would overflow and
+    // Phi(x) would underflow.
+    double u = -x;
+    double i2 = 1 / (u * u);
+    double mills = (1 - i2 * (1 - 3 * i2 * (1 - 5 * i2 * (1 - 7 * i2)))) / u;
+    return std::exp(a - 0.5 * u * u) * kInvSqrt2Pi * mills;
 }
 
 std::vector<double> solveLinear(const Matrix& a, const std::vector<double>& b) {

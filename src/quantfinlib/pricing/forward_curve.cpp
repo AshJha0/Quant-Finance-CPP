@@ -6,14 +6,14 @@
 namespace quantfinlib {
 
 ForwardCurve::ForwardCurve(double spot) : spot_(spot) {
-    if (spot <= 0) {
+    if (!(spot > 0)) {
         throw std::invalid_argument("spot must be positive");
     }
     outrights_[0.0] = spot;
 }
 
 ForwardCurve& ForwardCurve::addPoint(double tenorYears, double outrightForward) {
-    if (tenorYears <= 0) {
+    if (!(tenorYears > 0)) {
         throw std::invalid_argument("tenor must be positive");
     }
     outrights_[tenorYears] = outrightForward;
@@ -25,7 +25,7 @@ double ForwardCurve::spot() const {
 }
 
 double ForwardCurve::forward(double tenorYears) const {
-    if (tenorYears <= 0) {
+    if (!(tenorYears > 0)) {
         return spot_;
     }
     auto hi = outrights_.lower_bound(tenorYears);  // ceilingEntry

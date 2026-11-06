@@ -21,7 +21,7 @@ DividendSchedule DividendSchedule::of(const std::vector<double>& exTimesYears,
         throw std::invalid_argument("times and amounts must align");
     }
     for (std::size_t i = 0; i < exTimesYears.size(); i++) {
-        if (exTimesYears[i] <= 0 || amounts[i] < 0) {
+        if (!(exTimesYears[i] > 0) || !(amounts[i] >= 0)) {
             throw std::invalid_argument("ex-times must be > 0 and amounts >= 0");
         }
         if (i > 0 && exTimesYears[i] <= exTimesYears[i - 1]) {

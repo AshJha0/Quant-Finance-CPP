@@ -13,14 +13,13 @@
 //   caplet is pure intrinsic — included (market convention).
 // Two identities keep this honest (both pinned by tests): payer -
 // receiver = annuity*(F - K), and cap - floor = the matching swap's PV.
-// Annual fixed legs and accrual periods (tau = 1); one flat lognormal
-// vol per product.
-//
-// Note: the Java class delegates to pricing.Black76; the pricing domain
-// is not part of this port, so rates_options.cpp carries a file-local
-// copy of the Black-76 price formula (coefficients identical).
+// The int overloads are annual and lognormal, and throw when a forward is
+// not positive. The VolModel overloads take any payment frequency and a
+// normal (Bachelier) or shifted lognormal model, which is how negative rates
+// are priced. One flat vol per product.
 #pragma once
 
+#include "quantfinlib/pricing/black_scholes.hpp"
 #include "quantfinlib/rates/yield_curve.hpp"
 
 namespace quantfinlib {
@@ -39,6 +38,58 @@ double forwardSwapRate(const YieldCurve& curve, int startYears, int tenorYears);
  */
 double swaption(const YieldCurve& curve, int startYears, int tenorYears,
                 double strike, double vol, bool payer);
+
+/** The vol quoting convention of an option on a rate. */
+class VolModel {
+public:
+    enum class Type { LOGNORMAL, SHIFTED_LOGNORMAL, NORMAL };
+
+    static VolModel lognormal() { return VolModel(Type::LOGNORMAL, 0); }
+    /** Black on F + shift, K + shift; the market's displaced diffusion. */
+    static VolModel shiftedLognormal(double shift);
+    static VolModel normal() { return VolModel(Type::NORMAL, 0); }
+
+    Type type() const { return type_; }
+    double shift() const { return shift_; }
+
+    /**
+     * Undiscounted option value. An expired option is intrinsic in every
+     * model. Lognormal models throw unless F + shift > 0 and K + shift > 0.
+     */
+    double forwardValue(OptionType type, double forward, double strike, double vol,
+                        double expiry) const;
+
+    /** Vol that reproduces an undiscounted value; NaN when none exists. */
+    double impliedVol(OptionType type, double forwardValue, double forward, double strike,
+                      double expiry) const;
+
+private:
+    VolModel(Type type, double shift) : type_(type), shift_(shift) {}
+
+    Type type_;
+    double shift_;
+};
+
+/** Annuity sum tau*DF over periods of 1/paymentsPerYear after startYears. */
+double annuity(const YieldCurve& curve, double startYears, double tenorYears,
+               int paymentsPerYear);
+
+double forwardSwapRate(const YieldCurve& curve, double startYears, double tenorYears,
+                       int paymentsPerYear);
+
+/** Swaption under a vol model; strike may be negative in normal and shifted models. */
+double swaption(const YieldCurve& curve, double startYears, double tenorYears,
+                int paymentsPerYear, double strike, double vol, bool payer,
+                const VolModel& model);
+
+/** The vol that reprices a swaption under a vol model. */
+double swaptionImpliedVol(const YieldCurve& curve, double startYears, double tenorYears,
+                          int paymentsPerYear, double strike, double price, bool payer,
+                          const VolModel& model);
+
+/** Cap (isCap) or floor under a vol model; tau-weighted caplets, first fixed at 0. */
+double capFloor(const YieldCurve& curve, double maturityYears, int paymentsPerYear,
+                double strike, double vol, bool isCap, const VolModel& model);
 
 /** Cap: strip of annual Black-76 caplets to `maturityYears`. */
 double cap(const YieldCurve& curve, int maturityYears, double strike, double vol);

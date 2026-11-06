@@ -6,6 +6,7 @@
 #include <string>
 
 #include "quantfinlib/risk/gaussian_copula.hpp"
+#include "quantfinlib/risk/tail_risk.hpp"
 #include "quantfinlib/risk/java_random.hpp"
 #include "quantfinlib/util/math_utils.hpp"
 
@@ -128,7 +129,9 @@ VarResult monteCarloVar(const std::vector<double>& exposures, const Matrix& cova
     if (scenarios < 100) {
         throw std::invalid_argument("need >= 100 scenarios");
     }
-    Matrix chol = GaussianCopula::cholesky(covariance);
+    // Semi-definite is legal here: two perfectly correlated factors are a
+    // valid book, and the shared factor keeps the rank-deficient direction.
+    Matrix chol = math_utils::cholesky(covariance);
     JavaRandom rnd(seed);
     std::vector<double> z(n);
     std::vector<double> losses(scenarios);
@@ -218,18 +221,8 @@ VarResult tail(const std::vector<double>& losses, double confidence) {
     if (!(confidence > 0.5 && confidence < 1)) {
         throw std::invalid_argument("confidence must be in (0.5, 1)");
     }
-    std::vector<double> sorted = losses;
-    std::sort(sorted.begin(), sorted.end());
-    int n = static_cast<int>(sorted.size());
-    int index = std::min(n - 1, static_cast<int>(std::ceil(confidence * n)) - 1);
-    double var = std::max(0.0, sorted[index]);
-    double sum = 0;
-    int count = 0;
-    for (int i = index; i < n; i++) {
-        sum += sorted[i];
-        count++;
-    }
-    return {var, std::max(0.0, sum / count)};
+    tail_risk::Tail t = tail_risk::of(losses, confidence);
+    return {std::max(0.0, t.var), std::max(0.0, t.expectedShortfall)};
 }
 
 }  // namespace var_engine

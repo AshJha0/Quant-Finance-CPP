@@ -8,7 +8,8 @@
 //   upfront(S_c)  = protectionPv - S_c * riskyAnnuity
 // Positive upfront means the protection buyer pays points up front. The
 // risky annuity is also the desk's "risky DV01". Same quarterly
-// discretization as the bootstrap, stated there.
+// discretization as the bootstrap, stated there, with a final short period to
+// a maturity off the grid. Not the ISDA standard model.
 #pragma once
 
 #include "quantfinlib/credit/credit_curve.hpp"

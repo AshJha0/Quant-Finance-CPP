@@ -9,7 +9,7 @@ namespace quantfinlib {
 
 SwapPointsCurve::Builder::Builder(CurrencyPair pair, LocalDate tradeDate, double spotRate)
     : pair_(std::move(pair)), tradeDate_(tradeDate), spotRate_(spotRate) {
-    if (spotRate <= 0) {
+    if (!(spotRate > 0)) {
         throw std::invalid_argument("spotRate must be > 0: " + std::to_string(spotRate));
     }
 }
