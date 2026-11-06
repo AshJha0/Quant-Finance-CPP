@@ -1,5 +1,6 @@
 #include "quantfinlib/fix/fix_message.hpp"
 
+#include <algorithm>
 #include <charconv>
 #include <cmath>
 #include <cstdio>
@@ -20,6 +21,8 @@ const std::string FixMessage::NEW_ORDER_SINGLE = "D";
 const std::string FixMessage::EXECUTION_REPORT = "8";
 const std::string FixMessage::ORDER_CANCEL_REQUEST = "F";
 const std::string FixMessage::ORDER_CANCEL_REPLACE_REQUEST = "G";
+const std::string FixMessage::ORDER_CANCEL_REJECT = "9";
+const std::string FixMessage::BUSINESS_MESSAGE_REJECT = "j";
 
 namespace {
 
@@ -122,7 +125,8 @@ std::string threeDigits(unsigned v) {
 
 }  // namespace
 
-FixMessage::FixMessage(std::map<int, std::string> fields) : fields_(std::move(fields)) {
+FixMessage::FixMessage(std::map<int, std::string> fields, std::vector<Field> ordered)
+        : fields_(std::move(fields)), ordered_(std::move(ordered)) {
 }
 
 FixMessage FixMessage::parse(const std::uint8_t* bytes, std::size_t length) {
@@ -147,6 +151,7 @@ FixMessage FixMessage::parse(const std::uint8_t* bytes, std::size_t length) {
     }
 
     std::map<int, std::string> fields;
+    std::vector<Field> ordered;
     std::string body = raw.substr(0, raw.size() - 1);
     std::size_t pos = 0;
     while (pos <= body.size()) {
@@ -164,6 +169,7 @@ FixMessage FixMessage::parse(const std::uint8_t* bytes, std::size_t length) {
             throw std::invalid_argument("duplicate header tag " + std::to_string(tag));
         }
         fields[tag] = pair.substr(eq + 1);
+        ordered.push_back(Field{tag, fields[tag]});
         if (next == std::string::npos) {
             break;
         }
@@ -185,7 +191,7 @@ FixMessage FixMessage::parse(const std::uint8_t* bytes, std::size_t length) {
                                      + std::to_string(declaredLen) + " actual "
                                      + std::to_string(actualLen));
     }
-    return FixMessage(std::move(fields));
+    return FixMessage(std::move(fields), std::move(ordered));
 }
 
 FixMessage FixMessage::parse(const std::vector<std::uint8_t>& bytes) {
@@ -230,6 +236,59 @@ char FixMessage::getChar(int tag) const {
     return getString(tag).at(0);
 }
 
+std::size_t FixMessage::count(int tag) const {
+    return static_cast<std::size_t>(std::count_if(
+            ordered_.begin(), ordered_.end(), [tag](const Field& f) { return f.tag == tag; }));
+}
+
+std::vector<std::string> FixMessage::getAll(int tag) const {
+    std::vector<std::string> values;
+    for (const Field& f : ordered_) {
+        if (f.tag == tag) {
+            values.push_back(f.value);
+        }
+    }
+    return values;
+}
+
+std::vector<std::vector<FixMessage::Field>> FixMessage::group(
+        int countTag, const std::vector<int>& memberTags) const {
+    if (memberTags.empty()) {
+        throw std::invalid_argument("group needs a delimiter tag");
+    }
+    std::vector<std::vector<Field>> entries;
+    auto it = std::find_if(ordered_.begin(), ordered_.end(),
+                           [countTag](const Field& f) { return f.tag == countTag; });
+    if (it == ordered_.end()) {
+        return entries;
+    }
+    if (count(countTag) != 1) {
+        throw std::invalid_argument("repeated group count tag " + std::to_string(countTag));
+    }
+    std::int64_t declared = parseInteger(countTag, it->value);
+    if (declared < 0) {
+        throw std::invalid_argument("negative group count in tag " + std::to_string(countTag));
+    }
+    for (++it; it != ordered_.end(); ++it) {
+        if (std::find(memberTags.begin(), memberTags.end(), it->tag) == memberTags.end()) {
+            break;
+        }
+        if (it->tag == memberTags.front()) {
+            entries.emplace_back();
+        } else if (entries.empty()) {
+            throw std::invalid_argument("group " + std::to_string(countTag)
+                                        + " does not open with its delimiter");
+        }
+        entries.back().push_back(*it);
+    }
+    if (static_cast<std::int64_t>(entries.size()) != declared) {
+        throw std::invalid_argument("group " + std::to_string(countTag) + " declares "
+                                    + std::to_string(declared) + " entries, found "
+                                    + std::to_string(entries.size()));
+    }
+    return entries;
+}
+
 std::string FixMessage::toString() const {
     std::string sb;
     for (const auto& [tag, value] : fields_) {
@@ -255,6 +314,9 @@ FixMessage::Builder FixMessage::Builder::restore(std::string msgType, std::strin
 }
 
 FixMessage::Builder& FixMessage::Builder::field(int tag, const std::string& value) {
+    if (value.find(SOH) != std::string::npos) {
+        throw std::invalid_argument("tag " + std::to_string(tag) + " value contains SOH");
+    }
     body_ += std::to_string(tag);
     body_ += '=';
     body_ += value;

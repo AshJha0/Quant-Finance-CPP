@@ -29,19 +29,7 @@ int checkedSize(int maxSymbols) {
 
 HftRiskGate::HftRiskGate(int maxSymbols)
         : maxSymbols_(checkedSize(maxSymbols)),
-          positions_(new std::atomic<std::int64_t>[maxSymbols]),
-          openBuy_(new std::atomic<std::int64_t>[maxSymbols]),
-          openSell_(new std::atomic<std::int64_t>[maxSymbols]),
-          referencePrices_(new std::atomic<double>[maxSymbols]),
-          halted_(new std::atomic<bool>[maxSymbols]) {
-    for (int i = 0; i < maxSymbols; i++) {
-        positions_[i].store(0, std::memory_order_relaxed);
-        openBuy_[i].store(0, std::memory_order_relaxed);
-        openSell_[i].store(0, std::memory_order_relaxed);
-        referencePrices_[i].store(std::numeric_limits<double>::quiet_NaN(),
-                                  std::memory_order_relaxed);
-        halted_[i].store(false, std::memory_order_relaxed);
-    }
+          symbols_(new SymbolState[static_cast<std::size_t>(maxSymbols)]) {
     for (auto& r : rejections_) {
         r.store(0, std::memory_order_relaxed);
     }
@@ -52,18 +40,18 @@ void HftRiskGate::setReferencePrice(int symbolId, double price) {
         badReferences_.fetch_add(1, std::memory_order_acq_rel);
         return;
     }
-    referencePrices_[symbolId].store(price, std::memory_order_release);
+    symbols_[symbolId].reference.store(price, std::memory_order_release);
 }
 
 bool HftRiskGate::withinCap(int symbolId, Side side, std::int64_t open) const {
     // The caller loaded `open` before this position load; see the header.
-    std::int64_t position = positions_[symbolId].load(std::memory_order_acquire);
+    std::int64_t position = symbols_[symbolId].position.load(std::memory_order_acquire);
     return side == Side::BUY ? saturatingAdd(position, open) <= maxPositionQuantity_
                              : saturatingSub(position, open) >= -maxPositionQuantity_;
 }
 
 bool HftRiskGate::strictlyReducing(int symbolId, Side side, std::int64_t open) const {
-    std::int64_t position = positions_[symbolId].load(std::memory_order_acquire);
+    std::int64_t position = symbols_[symbolId].position.load(std::memory_order_acquire);
     // The buy form avoids negating INT64_MIN.
     return side == Side::BUY ? position < 0 && open - 1 <= -(position + 1)
                              : position > 0 && open <= position;
@@ -83,7 +71,7 @@ int HftRiskGate::evaluate(int symbolId, Side side, std::int64_t orderQuantity, s
             && (orderQuantity <= 0 || !strictlyReducing(symbolId, side, open))) {
         return reject(REJECT_KILLED);
     }
-    if (halted_[symbolId].load(std::memory_order_acquire)) {
+    if (symbols_[symbolId].halted.load(std::memory_order_acquire)) {
         return reject(REJECT_HALTED);
     }
     if (orderQuantity <= 0 || orderQuantity > maxOrderQuantity_ || delta < 0) {
@@ -93,7 +81,7 @@ int HftRiskGate::evaluate(int symbolId, Side side, std::int64_t orderQuantity, s
         return reject(REJECT_NOTIONAL);
     }
     if (referenceCheck_) {
-        double ref = referencePrices_[symbolId].load(std::memory_order_acquire);
+        double ref = symbols_[symbolId].reference.load(std::memory_order_acquire);
         // Written so that a NaN reference or an unconfigured collar rejects.
         if (!(std::fabs(price - ref) <= ref * priceCollarPct_)) {
             return reject(REJECT_PRICE_COLLAR);
@@ -128,6 +116,22 @@ int HftRiskGate::reserveDelta(int symbolId, Side side, std::int64_t orderQuantit
         return reject(REJECT_KILLED);
     }
     return OK;
+}
+
+HftRiskGate::Layout HftRiskGate::layout() const {
+    auto base = reinterpret_cast<std::uintptr_t>(this);
+    auto at = [base](const void* p) {
+        return static_cast<std::size_t>(reinterpret_cast<std::uintptr_t>(p) - base);
+    };
+    const SymbolState& s = symbols_[0];
+    return Layout{sizeof(SymbolState),
+                  alignof(SymbolState),
+                  static_cast<std::size_t>(reinterpret_cast<std::uintptr_t>(&s.reference)
+                                           - reinterpret_cast<std::uintptr_t>(&s.position)),
+                  at(&symbols_),
+                  at(&rejections_[0]),
+                  at(&killMask_),
+                  at(&maxOrderQuantity_)};
 }
 
 std::string HftRiskGate::reasonName(int code) {

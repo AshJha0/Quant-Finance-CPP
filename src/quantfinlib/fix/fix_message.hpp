@@ -1,8 +1,10 @@
 // Port of com.quantfinlib.fix.FixMessage (Java): FIX 4.4 wire-format
 // message: tag=value fields delimited by SOH, framed by BeginString(8) /
 // BodyLength(9) / CheckSum(10). Parsing validates the checksum and body
-// length; building computes them. No repeating-group support -- sufficient
-// for the session and single-order message types this engine speaks.
+// length; building computes them. Field access by tag sees the last value of
+// a tag; fields() keeps every field in wire order, duplicates included, and
+// group() cuts a repeating group out of it. Nested groups are not parsed.
+// Builder refuses a value containing SOH: it would forge extra fields.
 // IllegalArgumentException maps to std::invalid_argument.
 #pragma once
 
@@ -59,6 +61,8 @@ public:
     static constexpr int EXEC_TYPE = 150;
     static constexpr int LEAVES_QTY = 151;
     static constexpr int SESSION_REJECT_REASON = 373;
+    static constexpr int CXL_REJ_REASON = 102;
+    static constexpr int CXL_REJ_RESPONSE_TO = 434;
     static constexpr int USERNAME = 553;
     static constexpr int PASSWORD = 554;
 
@@ -74,6 +78,14 @@ public:
     static const std::string EXECUTION_REPORT;
     static const std::string ORDER_CANCEL_REQUEST;
     static const std::string ORDER_CANCEL_REPLACE_REQUEST;
+    static const std::string ORDER_CANCEL_REJECT;
+    static const std::string BUSINESS_MESSAGE_REJECT;
+
+    /** One tag=value pair as it appeared on the wire. */
+    struct Field {
+        int tag;
+        std::string value;
+    };
 
     // ------------------------------------------------------------------
     // Parsing
@@ -97,6 +109,25 @@ public:
     char getChar(int tag) const;
     std::string toString() const;
 
+    /** Every field in wire order, header and trailer included, duplicates kept. */
+    const std::vector<Field>& fields() const { return ordered_; }
+
+    /** How many times a tag appears. */
+    std::size_t count(int tag) const;
+
+    /** Every value of a tag, in wire order. */
+    std::vector<std::string> getAll(int tag) const;
+
+    /**
+     * Cuts out a repeating group. memberTags lists the tags of one entry,
+     * delimiter first: each delimiter opens an entry, and the first tag not
+     * listed ends the group. No count tag gives an empty result. Throws
+     * std::invalid_argument if the count is malformed or disagrees with the
+     * entries found, or if the fields after the count do not open with the
+     * delimiter.
+     */
+    std::vector<std::vector<Field>> group(int countTag, const std::vector<int>& memberTags) const;
+
     // ------------------------------------------------------------------
     // Building
     // ------------------------------------------------------------------
@@ -112,6 +143,7 @@ public:
         /** Raw body fields (for the session's outbound message store). */
         const std::string& body() const { return body_; }
 
+        /** Throws std::invalid_argument if the value contains SOH. */
         Builder& field(int tag, const std::string& value);
         Builder& field(int tag, std::int64_t value);
         Builder& field(int tag, char value);
@@ -143,9 +175,10 @@ public:
     static Builder builder(const std::string& msgType) { return Builder(msgType); }
 
 private:
-    explicit FixMessage(std::map<int, std::string> fields);
+    FixMessage(std::map<int, std::string> fields, std::vector<Field> ordered);
 
     std::map<int, std::string> fields_;
+    std::vector<Field> ordered_;
 };
 
 }  // namespace quantfinlib

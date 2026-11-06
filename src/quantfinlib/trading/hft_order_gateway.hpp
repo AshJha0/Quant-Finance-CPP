@@ -13,8 +13,9 @@
 // order's whole life. Each wire message carries a ClOrdID:
 //     clOrdId = orderId | version << 40
 // version 0 is the new order, so its ClOrdID equals the order id; every
-// cancel or replace takes the next version and names the previous ClOrdID as
-// origClOrdId, as FIX does. A report quoting any issued version finds the
+// cancel or replace takes the next version and names the last ClOrdID the
+// venue accepted as origClOrdId, as FIX does: a refused request never renames
+// the order. A report quoting any issued version finds the
 // order: a fill in flight may still carry the old one.
 //
 // Life of an order:
@@ -48,14 +49,23 @@
 // one compare; only an order inside the bound walks the symbol's working list.
 //
 // Threading. Any thread may call submit, cancel, replace and the on* methods:
-// one short spinlock guards the table and serialises ring producers. It is
-// never held across a listener, so a listener may call back in. The lock is
-// the price of a table shared with the venue-ack thread; it is held for a
-// few dozen instructions, so it spins rather than parks.
+// one spinlock guards the table and serialises ring producers. It is never
+// held across a listener, so a listener may call back in. It cannot go: the
+// reservation, the self-trade check and the ring publish must be one step
+// against a table the ack thread also changes. The usual hold is a few dozen
+// instructions. Two holds are longer, by design and bounded: the self-trade
+// walk, only when a price lands inside the bound, is as long as the symbol's
+// working list; a sweep takes the lock per block of slots, so a kill never
+// stalls the trading thread for a whole table.
+//
+// Listeners live behind a plain atomic pointer to an immutable list, as in
+// HftMarketDataBus. Every list ever published is kept until the destructor,
+// since a drain may still be walking an old one. Adding is a setup action.
 #pragma once
 
 #include <atomic>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -196,6 +206,13 @@ public:
     bool onReplaceAck(std::int64_t clOrdId);
     bool onReplaceReject(std::int64_t clOrdId);
 
+    /**
+     * The venue says the order is over without a pending request of ours
+     * behind it: an unsolicited cancel, an expiry, its own cancel-on-disconnect.
+     * Also the right call for a solicited cancel confirmation.
+     */
+    bool onOrderOut(std::int64_t clOrdId);
+
     /** Books a fill. False means an execution fault: see the header note. */
     bool onFill(std::int64_t clOrdId, int symbolId, Side side, std::int64_t quantity);
 
@@ -210,6 +227,12 @@ public:
 
     /** Quantity still able to fill on the order at its current size; 0 once done. */
     std::int64_t leavesQuantity(std::int64_t orderId) const;
+
+    /** Quantity filled so far on the order; -1 if it is not in the table. */
+    std::int64_t filledQuantity(std::int64_t clOrdId) const;
+
+    /** Whether this gateway could have issued the ClOrdID, finished orders included. */
+    bool issued(std::int64_t clOrdId) const;
 
     /** Orders in the table. */
     int openOrderCount() const { return live_.load(std::memory_order_acquire); }
@@ -253,6 +276,7 @@ private:
         double price = 0;
         double pendingPrice = 0;
         std::int64_t version = 0;
+        std::int64_t ackedVersion = 0;   // the name the venue knows the order by
         int symbolId = 0;
         int prev = -1;              // per-symbol list of working orders
         int next = -1;
@@ -278,14 +302,18 @@ private:
                    Side side, std::int64_t quantity, double price, std::int64_t timestampNanos);
     void venueLoop();
 
-    using OrderVec = std::vector<OrderListener>;
-    using VenueVec = std::vector<VenueListener>;
+    using OrderVec = std::vector<const OrderListener*>;
+    using VenueVec = std::vector<const VenueListener*>;
 
     OrderRingBuffer ring_;
     HftRiskGate& riskGate_;
     const bool busySpin_;
-    std::atomic<std::shared_ptr<const OrderVec>> listeners_;
-    std::atomic<std::shared_ptr<const VenueVec>> venueListeners_;
+    std::atomic<const OrderVec*> listeners_{nullptr};
+    std::atomic<const VenueVec*> venueListeners_{nullptr};
+    std::deque<OrderListener> orderListenerStore_;   // deque keeps addresses stable
+    std::deque<VenueListener> venueListenerStore_;
+    std::vector<std::unique_ptr<const OrderVec>> orderLists_;
+    std::vector<std::unique_ptr<const VenueVec>> venueLists_;
     SelfTradeHook selfTradeHook_ = nullptr;
     void* selfTradeContext_ = nullptr;
 

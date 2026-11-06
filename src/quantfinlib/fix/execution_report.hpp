@@ -28,10 +28,17 @@ struct ExecutionReport {
     double avgPrice;
 
     static constexpr char EXEC_TYPE_NEW = '0';
+    static constexpr char EXEC_TYPE_DONE_FOR_DAY = '3';
     static constexpr char EXEC_TYPE_CANCELED = '4';
     static constexpr char EXEC_TYPE_REPLACED = '5';
     static constexpr char EXEC_TYPE_TRADE = 'F';
     static constexpr char EXEC_TYPE_REJECTED = '8';
+    static constexpr char EXEC_TYPE_PENDING_NEW = 'A';
+    static constexpr char EXEC_TYPE_EXPIRED = 'C';
+    static constexpr char EXEC_TYPE_RESTATED = 'D';
+    static constexpr char EXEC_TYPE_PENDING_REPLACE = 'E';
+    static constexpr char EXEC_TYPE_PENDING_CANCEL = '6';
+    static constexpr char EXEC_TYPE_ORDER_STATUS = 'I';
     static constexpr char ORD_STATUS_NEW = '0';
     static constexpr char ORD_STATUS_PARTIALLY_FILLED = '1';
     static constexpr char ORD_STATUS_FILLED = '2';

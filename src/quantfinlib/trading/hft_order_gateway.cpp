@@ -31,6 +31,8 @@ std::int64_t roundUpPow2(int requested) {
     return size;
 }
 
+constexpr std::size_t kSweepBlock = 64;
+
 constexpr double kNoBuy = 0.0;   // prices are positive, so nothing crosses these
 constexpr double kNoSell = std::numeric_limits<double>::infinity();
 
@@ -76,18 +78,22 @@ std::int64_t HftOrderGateway::steadyNanos() {
 
 void HftOrderGateway::addOrderListener(OrderListener listener) {
     std::lock_guard<std::mutex> lock(setupMutex_);
-    auto cur = listeners_.load(std::memory_order_acquire);
-    auto next = std::make_shared<OrderVec>(cur ? *cur : OrderVec{});
-    next->push_back(std::move(listener));
-    listeners_.store(std::move(next), std::memory_order_release);
+    orderListenerStore_.push_back(std::move(listener));
+    const OrderVec* cur = listeners_.load(std::memory_order_acquire);
+    auto next = std::make_unique<OrderVec>(cur ? *cur : OrderVec{});
+    next->push_back(&orderListenerStore_.back());
+    listeners_.store(next.get(), std::memory_order_release);
+    orderLists_.push_back(std::move(next));
 }
 
 void HftOrderGateway::addVenueListener(VenueListener listener) {
     std::lock_guard<std::mutex> lock(setupMutex_);
-    auto cur = venueListeners_.load(std::memory_order_acquire);
-    auto next = std::make_shared<VenueVec>(cur ? *cur : VenueVec{});
-    next->push_back(std::move(listener));
-    venueListeners_.store(std::move(next), std::memory_order_release);
+    venueListenerStore_.push_back(std::move(listener));
+    const VenueVec* cur = venueListeners_.load(std::memory_order_acquire);
+    auto next = std::make_unique<VenueVec>(cur ? *cur : VenueVec{});
+    next->push_back(&venueListenerStore_.back());
+    venueListeners_.store(next.get(), std::memory_order_release);
+    venueLists_.push_back(std::move(next));
 }
 
 void HftOrderGateway::enableDeadMan(std::int64_t timeoutNanos, std::int64_t nowNanos) {
@@ -233,6 +239,10 @@ void HftOrderGateway::resolveReplace(Slot& slot, bool accepted) {
 std::int64_t HftOrderGateway::submit(int symbolId, Side side, std::int64_t quantity, double price,
                                      std::int64_t timestampNanos) {
     SpinGuard guard(lock_);
+    // Read first. A kill landing after this is not reduce-only just because
+    // it beat the order to the table: the order passed as a normal one, and
+    // delivery must stop it.
+    bool reduceOnly = riskGate_.isKilled();
     int code = riskGate_.reserve(symbolId, side, quantity, price);
     if (code != HftRiskGate::OK) {
         return -code;
@@ -265,7 +275,7 @@ std::int64_t HftOrderGateway::submit(int symbolId, Side side, std::int64_t quant
     slot.reserved = quantity;
     slot.price = price;
     slot.state = State::QUEUED;
-    slot.reduceOnly = riskGate_.isKilled();
+    slot.reduceOnly = reduceOnly;
     link(index);
     live_.fetch_add(1, std::memory_order_acq_rel);
     nextId_ = id + 1;
@@ -284,7 +294,7 @@ std::int64_t HftOrderGateway::cancel(std::int64_t orderId, std::int64_t timestam
         finish(*slot);
         return orderId;
     }
-    std::int64_t orig = clOrdIdOf(slot->orderId, slot->version);
+    std::int64_t orig = clOrdIdOf(slot->orderId, slot->ackedVersion);
     std::int64_t clOrdId = clOrdIdOf(slot->orderId, slot->version + 1);
     if (!ring_.publishMessage(kCancel, clOrdId, orig, slot->symbolId, slot->side, slot->quantity,
                               slot->price, timestampNanos)) {
@@ -324,7 +334,7 @@ std::int64_t HftOrderGateway::replace(std::int64_t orderId, std::int64_t newLeav
         riskGate_.countRejection(HftRiskGate::REJECT_SELF_TRADE);
         return -HftRiskGate::REJECT_SELF_TRADE;
     }
-    std::int64_t orig = clOrdIdOf(slot->orderId, slot->version);
+    std::int64_t orig = clOrdIdOf(slot->orderId, slot->ackedVersion);
     std::int64_t clOrdId = clOrdIdOf(slot->orderId, slot->version + 1);
     if (!ring_.publishMessage(kReplace, clOrdId, orig, slot->symbolId, slot->side, total, newPrice,
                               timestampNanos)) {
@@ -342,29 +352,36 @@ std::int64_t HftOrderGateway::replace(std::int64_t orderId, std::int64_t newLeav
 }
 
 int HftOrderGateway::sweep(std::int64_t timestampNanos, bool skipReduceOnly) {
-    SpinGuard guard(lock_);
     int acted = 0;
-    for (Slot& slot : slots_) {
-        if (slot.orderId == 0 || slot.cancelPending || (skipReduceOnly && slot.reduceOnly)) {
-            continue;
-        }
-        if (slot.state == State::QUEUED) {
-            finish(slot);
-            blocked_.fetch_add(1, std::memory_order_acq_rel);
+    // The kill is already latched, so an order landing behind the sweep is
+    // reduce-only or gets stopped at delivery. Nothing needs the whole table
+    // held at once.
+    for (std::size_t base = 0; base < slots_.size(); base += kSweepBlock) {
+        SpinGuard guard(lock_);
+        std::size_t end = std::min(slots_.size(), base + kSweepBlock);
+        for (std::size_t i = base; i < end; i++) {
+            Slot& slot = slots_[i];
+            if (slot.orderId == 0 || slot.cancelPending || (skipReduceOnly && slot.reduceOnly)) {
+                continue;
+            }
+            if (slot.state == State::QUEUED) {
+                finish(slot);
+                blocked_.fetch_add(1, std::memory_order_acq_rel);
+                acted++;
+                continue;
+            }
+            std::int64_t orig = clOrdIdOf(slot.orderId, slot.ackedVersion);
+            std::int64_t clOrdId = clOrdIdOf(slot.orderId, slot.version + 1);
+            if (!ring_.publishMessage(kCancel, clOrdId, orig, slot.symbolId, slot.side,
+                                      slot.quantity, slot.price, timestampNanos)) {
+                ringFull_.fetch_add(1, std::memory_order_acq_rel);
+                sweepPending_.store(true, std::memory_order_release);
+                continue;
+            }
+            slot.version++;
+            slot.cancelPending = true;
             acted++;
-            continue;
         }
-        std::int64_t orig = clOrdIdOf(slot.orderId, slot.version);
-        std::int64_t clOrdId = clOrdIdOf(slot.orderId, slot.version + 1);
-        if (!ring_.publishMessage(kCancel, clOrdId, orig, slot.symbolId, slot.side, slot.quantity,
-                                  slot.price, timestampNanos)) {
-            ringFull_.fetch_add(1, std::memory_order_acq_rel);
-            sweepPending_.store(true, std::memory_order_release);
-            continue;
-        }
-        slot.version++;
-        slot.cancelPending = true;
-        acted++;
     }
     return acted;
 }
@@ -424,6 +441,7 @@ bool HftOrderGateway::onReplaceAck(std::int64_t clOrdId) {
         unmatched_.fetch_add(1, std::memory_order_acq_rel);
         return false;
     }
+    slot->ackedVersion = clOrdId >> kVersionShift;
     resolveReplace(*slot, true);
     return true;
 }
@@ -436,6 +454,17 @@ bool HftOrderGateway::onReplaceReject(std::int64_t clOrdId) {
         return false;
     }
     resolveReplace(*slot, false);
+    return true;
+}
+
+bool HftOrderGateway::onOrderOut(std::int64_t clOrdId) {
+    SpinGuard guard(lock_);
+    Slot* slot = find(clOrdId);
+    if (slot == nullptr || slot->state == State::QUEUED) {
+        unmatched_.fetch_add(1, std::memory_order_acq_rel);
+        return false;
+    }
+    finish(*slot);
     return true;
 }
 
@@ -474,6 +503,25 @@ std::int64_t HftOrderGateway::leavesQuantity(std::int64_t orderId) const {
     return slot == nullptr ? 0 : std::max<std::int64_t>(0, slot->quantity - slot->filled);
 }
 
+std::int64_t HftOrderGateway::filledQuantity(std::int64_t clOrdId) const {
+    SpinGuard guard(lock_);
+    const Slot* slot = find(clOrdId);
+    return slot == nullptr ? -1 : slot->filled;
+}
+
+bool HftOrderGateway::issued(std::int64_t clOrdId) const {
+    SpinGuard guard(lock_);
+    if (clOrdId <= 0) {
+        return false;
+    }
+    std::int64_t orderId = clOrdId & kOrderIdMask;
+    if (orderId == 0 || orderId >= nextId_) {
+        return false;
+    }
+    const Slot& slot = slots_[static_cast<std::size_t>(orderId & slotMask_)];
+    return slot.orderId != orderId || (clOrdId >> kVersionShift) <= slot.version;
+}
+
 void HftOrderGateway::onDrained(std::uint8_t type, std::int64_t clOrdId, std::int64_t refId,
                                 int symbolId, Side side, std::int64_t quantity, double price,
                                 std::int64_t timestampNanos) {
@@ -507,19 +555,19 @@ void HftOrderGateway::onDrained(std::uint8_t type, std::int64_t clOrdId, std::in
     try {
         if (type == kNew) {
             delivered_.fetch_add(1, std::memory_order_acq_rel);
-            auto ls = listeners_.load(std::memory_order_acquire);
-            if (ls) {
-                for (const auto& l : *ls) {
-                    l(clOrdId, symbolId, side, quantity, price, timestampNanos);
+            const OrderVec* ls = listeners_.load(std::memory_order_acquire);
+            if (ls != nullptr) {
+                for (const OrderListener* l : *ls) {
+                    (*l)(clOrdId, symbolId, side, quantity, price, timestampNanos);
                 }
             }
         }
-        auto vs = venueListeners_.load(std::memory_order_acquire);
-        if (vs) {
+        const VenueVec* vs = venueListeners_.load(std::memory_order_acquire);
+        if (vs != nullptr) {
             VenueMessage message{static_cast<VenueMessage::Type>(type), clOrdId, refId, symbolId,
                                  side, quantity, price, timestampNanos};
-            for (const auto& l : *vs) {
-                l(message);
+            for (const VenueListener* l : *vs) {
+                (*l)(message);
             }
         }
     } catch (...) {

@@ -255,6 +255,10 @@ FixSession::Config::Config(std::string senderCompId_, std::string targetCompId_,
     if (heartbeatSeconds < 1) {
         throw std::invalid_argument("heartbeat must be >= 1s");
     }
+    if (senderCompId.find(FixMessage::SOH) != std::string::npos
+            || targetCompId.find(FixMessage::SOH) != std::string::npos) {
+        throw std::invalid_argument("CompID contains SOH");
+    }
 }
 
 FixSession::Config FixSession::Config::withCredentials(std::string username_,
@@ -501,6 +505,13 @@ std::string FixSession::sendOrderCancelReplace(const std::string& clOrdId,
     b.field(FixMessage::TIME_IN_FORCE, timeInForce);
     send(b);
     return clOrdId;
+}
+
+void FixSession::sendOrderCancelReject(const OrderCancelReject& reject) {
+    requireEstablished();
+    FixMessage::Builder b = reject.toBuilder();
+    b.field(FixMessage::TRANSACT_TIME, utcTimestampNow());
+    send(b);
 }
 
 void FixSession::sendReject(std::int64_t refSeqNum, const std::string& text) {
@@ -837,18 +848,22 @@ void FixSession::dispatch(const FixMessage& m, std::int64_t seq, bool resetAppli
         listener_.onReject(*this, m.has(FixMessage::REF_SEQ_NUM) ? m.getLong(FixMessage::REF_SEQ_NUM) : 0,
                            m.getString(FixMessage::TEXT, ""));
     } else if (type == FixMessage::EXECUTION_REPORT) {
-        dispatchApp(seq, [this, &m] {
+        dispatchApp(m, seq, [this, &m] {
             listener_.onExecutionReport(*this, ExecutionReport::fromMessage(m));
         });
+    } else if (type == FixMessage::ORDER_CANCEL_REJECT) {
+        dispatchApp(m, seq, [this, &m] {
+            listener_.onOrderCancelReject(*this, OrderCancelReject::fromMessage(m));
+        });
     } else if (type == FixMessage::NEW_ORDER_SINGLE) {
-        dispatchApp(seq,
+        dispatchApp(m, seq,
                     [this, &m] { listener_.onNewOrderSingle(*this, NewOrderSingle::fromMessage(m)); });
     } else if (type == FixMessage::ORDER_CANCEL_REQUEST) {
-        dispatchApp(seq, [this, &m] {
+        dispatchApp(m, seq, [this, &m] {
             listener_.onOrderCancelRequest(*this, OrderCancelRequest::fromMessage(m));
         });
     } else if (type == FixMessage::ORDER_CANCEL_REPLACE_REQUEST) {
-        dispatchApp(seq, [this, &m] {
+        dispatchApp(m, seq, [this, &m] {
             listener_.onOrderCancelReplace(*this, OrderCancelReplaceRequest::fromMessage(m));
         });
     } else {
@@ -856,10 +871,12 @@ void FixSession::dispatch(const FixMessage& m, std::int64_t seq, bool resetAppli
     }
 }
 
-void FixSession::dispatchApp(std::int64_t seq, const std::function<void()>& dispatch) {
+void FixSession::dispatchApp(const FixMessage& m, std::int64_t seq,
+                             const std::function<void()>& dispatch) {
     try {
         dispatch();
     } catch (const std::exception& e) {
+        listener_.onApplicationFault(*this, m, e.what());
         sendReject(seq, e.what());
     }
 }
