@@ -3,8 +3,9 @@
 // spread minus whatever improvement was given back
 // (notional*(halfSpread-improvement)/1e4); routed flow captures nothing;
 // hedge executions cost their all-in bps; router allocations cost their
-// blended expected bps. Inventory mark-to-market P&L is deliberately out
-// of scope. All notionals positive, all bps non-negative, book-currency
+// blended expected bps. Inventory mark-to-market comes from the book
+// (CentralRiskBook::inventoryPnl) through markInventory and is kept apart
+// from the flow economics; totalPnl() is the sum. All notionals positive, all bps non-negative, book-currency
 // units. Deterministic, single-threaded.
 //
 // DEVIATION FROM JAVA: writeState/readState (persist.Checkpoint section
@@ -53,6 +54,14 @@ public:
      */
     double netEconomics() const { return spreadCaptured_ - hedgeCost_ - routerCost_; }
 
+    /** Sets inventory mark-to-market to the book's current figure (not a delta). */
+    void markInventory(double inventoryPnl);
+
+    double inventoryPnl() const { return inventoryPnl_; }
+
+    /** What the desk actually made: flow economics plus inventory mark-to-market. */
+    double totalPnl() const { return netEconomics() + inventoryPnl_; }
+
     long internalizations() const { return internalizations_; }
     long hedges() const { return hedges_; }
 
@@ -61,6 +70,7 @@ private:
     double improvementPaid_ = 0;
     double hedgeCost_ = 0;
     double routerCost_ = 0;
+    double inventoryPnl_ = 0;
     long internalizations_ = 0;
     long hedges_ = 0;
 };

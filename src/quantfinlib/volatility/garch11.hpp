@@ -1,9 +1,11 @@
 // Port of com.quantfinlib.volatility.Garch11 (Java): GARCH(1,1) with
 // Gaussian maximum-likelihood fitting,
 //   h_t = omega + alpha*r_{t-1}^2 + beta*h_{t-1}.
-// Estimation uses variance targeting (omega = sampleVar*(1-alpha-beta)) and a
-// deterministic coarse-to-fine grid search over (alpha, beta), spanning the
-// FULL admissible box exactly as the Java source does.
+// Estimation is full maximum likelihood over (omega, alpha, beta), and nu for
+// Student-t innovations, with h_0 at the sample variance: Nelder-Mead from
+// three starts in an unconstrained reparameterisation that keeps omega > 0,
+// alpha, beta >= 0 and alpha + beta < 1. Standard errors are the inverse
+// observed information and the Bollerslev-Wooldridge sandwich.
 #pragma once
 
 #include <vector>
@@ -23,10 +25,23 @@ public:
         double unconditionalVariance() const { return omega / (1 - alpha - beta); }
     };
 
+    enum class Innovation { GAUSSIAN, STUDENT_T };
+
+    struct Fit {
+        Params params;
+        Innovation innovation;
+        double nu;                         // NaN for Gaussian
+        std::vector<double> standardErrors;       // omega, alpha, beta[, nu]; NaN if not PD
+        std::vector<double> robustStandardErrors;
+    };
+
     Garch11() = delete;
 
-    /** Fits GARCH(1,1) to (demeaned) returns by MLE with variance targeting. */
+    /** Gaussian MLE of GARCH(1,1) on demeaned returns. Needs 100 finite returns. */
     static Params fit(const std::vector<double>& returns);
+
+    /** MLE with the chosen innovation law, with standard errors. */
+    static Fit estimate(const std::vector<double>& returns, Innovation innovation);
 
     /** Conditional variance series under the fitted parameters (seeded at sample variance). */
     static std::vector<double> conditionalVariances(const std::vector<double>& returns,

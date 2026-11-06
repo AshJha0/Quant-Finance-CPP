@@ -3,6 +3,9 @@
 // benchmark helpers. Pins are ported 1:1 from the Java reference tests
 // (HftSorTest, ExecutionTest, AdaptiveSorTest) so the routing arithmetic
 // can never silently drift.
+// Pins the deprecated research overloads as well as the guarded ones.
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+
 #include <cmath>
 #include <cstdint>
 #include <limits>
@@ -53,6 +56,7 @@ TEST(hftSorFeesReorderVenuesAndRebatesAttract) {
     HftSor sor(2);
     sor.venueQuote(0, 0, 0, 10000, 500);
     sor.venueQuote(1, 0, 0, 10001, 500);
+    sor.allowTradeThrough(true);  // pure all-in ranking; the default guard is in execution_safety_test
     sor.fee(0, 3.0);   // 10_000 + 3 = 10_003 all-in
     sor.fee(1, -0.5);  // 10_001 - 0.5 = 10_000.5
     std::vector<std::int64_t> out(2);
@@ -159,9 +163,11 @@ TEST(sorRejectsNegativeQuantity) {
 }
 
 TEST(sorRespectsLimitPriceExcludingBestVenue) {
+    // The rebate makes ABOVE_LIMIT the best all-in price (about 99.96), but
+    // the limit applies to the raw price, and 100.06 is through a 100.05 buy.
     std::vector<VenueQuote> venues = {
-            VenueQuote{"CHEAP_BUT_ABOVE_LIMIT", 0, 0, 100.00, 500, 0.0, 1, false},
-            VenueQuote{"COMPLIANT", 0, 0, 100.10, 500, 0.0, 1, false}};
+            VenueQuote{"BEST_ALL_IN_ABOVE_LIMIT", 0, 0, 100.06, 500, -10.0, 1, false},
+            VenueQuote{"COMPLIANT", 0, 0, 100.00, 500, 0.0, 1, false}};
     smart_order_router::RoutingPlan plan =
             smart_order_router::route(Side::BUY, 300, venues, false, 100.05);
     EXPECT_TRUE(plan.legs.size() == 1);
@@ -169,9 +175,10 @@ TEST(sorRespectsLimitPriceExcludingBestVenue) {
 }
 
 TEST(sorReportsShortfallWhenLimitPriceExcludesAllVenues) {
+    // The cheapest raw price across these venues is 100.00.
     std::vector<VenueQuote> venues = smartOrderRouterVenues();
     smart_order_router::RoutingPlan plan =
-            smart_order_router::route(Side::BUY, 500, venues, false, 100.00);
+            smart_order_router::route(Side::BUY, 500, venues, false, 99.99);
     EXPECT_TRUE(plan.legs.empty());
     EXPECT_TRUE(plan.unroutedQty == 500);
 }

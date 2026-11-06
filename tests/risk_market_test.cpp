@@ -270,18 +270,20 @@ TEST(frtbArithmeticMatchesTheRegulationsFormulas) {
     double es = frtb_es::liquidityHorizonEs({10, 8, 5}, {10, 20, 60});
     EXPECT_NEAR(std::sqrt(264.0), es, 1e-12);
 
-    // The stressed ratio scales capital up, never down.
-    EXPECT_NEAR(150, frtb_es::stressCalibratedEs(100, 30, 20), 1e-12);  // ratio 1.5
-    // A calm stressed period floors at 1, never discounts.
-    EXPECT_NEAR(100, frtb_es::stressCalibratedEs(100, 10, 20), 1e-12);
+    // MAR33.6: ES_R,S * max(1, ES_F,C / ES_R,C). Repinned: the old pins came
+    // from the wrong formula (finding C13). Hand values:
+    EXPECT_NEAR(187.5, frtb_es::stressCalibratedEs(100, 150, 80), 1e-12);  // 150 * 1.25
+    // The ratio is floored at 1: a reduced set above the full set never discounts.
+    EXPECT_NEAR(150, frtb_es::stressCalibratedEs(100, 150, 120), 1e-12);
 
-    // ES 97.5 of a known tail: losses 1..1000; VaR = 975th value, ES =
-    // mean of 975..1000 (26 values) = 987.5 exactly.
+    // ES 97.5 of a known tail: losses 1..1000; w = 25, so Acerbi-Tasche ES =
+    // mean of 976..1000 = 988 exactly. Repinned from 987.5, which averaged the
+    // VaR observation as a 26th point (finding C14).
     std::vector<double> losses(1000);
     for (int i = 0; i < 1000; i++) {
         losses[i] = i + 1;
     }
-    EXPECT_NEAR(987.5, frtb_es::es975(losses), 1e-9);
+    EXPECT_NEAR(988.0, frtb_es::es975(losses), 1e-9);
 
     EXPECT_TRUE(frtb_es::trafficLightOf(4) == frtb_es::TrafficLight::GREEN);
     EXPECT_TRUE(frtb_es::trafficLightOf(5) == frtb_es::TrafficLight::AMBER);

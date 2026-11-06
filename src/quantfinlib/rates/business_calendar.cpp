@@ -60,7 +60,16 @@ LocalDate BusinessCalendar::subtractBusinessDays(const LocalDate& date, int n) c
 std::vector<LocalDate> BusinessCalendar::schedule(const LocalDate& effectiveDate,
                                                   const LocalDate& maturity,
                                                   int paymentsPerYear, Roll convention) const {
-    std::vector<LocalDate> unadjusted = unadjustedSchedule(effectiveDate, maturity, paymentsPerYear);
+    return schedule(effectiveDate, maturity, paymentsPerYear, convention, StubType::SHORT_FRONT,
+                    false);
+}
+
+std::vector<LocalDate> BusinessCalendar::schedule(const LocalDate& effectiveDate,
+                                                  const LocalDate& maturity,
+                                                  int paymentsPerYear, Roll convention,
+                                                  StubType stub, bool endOfMonth) const {
+    std::vector<LocalDate> unadjusted =
+            unadjustedSchedule(effectiveDate, maturity, paymentsPerYear, stub, endOfMonth);
     std::vector<LocalDate> out;
     out.reserve(unadjusted.size());
     for (const LocalDate& d : unadjusted) {
@@ -72,6 +81,14 @@ std::vector<LocalDate> BusinessCalendar::schedule(const LocalDate& effectiveDate
 std::vector<LocalDate> BusinessCalendar::unadjustedSchedule(const LocalDate& effectiveDate,
                                                             const LocalDate& maturity,
                                                             int paymentsPerYear) {
+    return unadjustedSchedule(effectiveDate, maturity, paymentsPerYear, StubType::SHORT_FRONT,
+                              false);
+}
+
+std::vector<LocalDate> BusinessCalendar::unadjustedSchedule(const LocalDate& effectiveDate,
+                                                            const LocalDate& maturity,
+                                                            int paymentsPerYear, StubType stub,
+                                                            bool endOfMonth) {
     if (paymentsPerYear < 1 || 12 % paymentsPerYear != 0) {
         throw std::invalid_argument("paymentsPerYear must divide 12");
     }
@@ -80,13 +97,43 @@ std::vector<LocalDate> BusinessCalendar::unadjustedSchedule(const LocalDate& eff
     }
     int months = 12 / paymentsPerYear;
     std::vector<LocalDate> dates;
-    LocalDate d = maturity;
-    while (d.isAfter(effectiveDate)) {
-        dates.push_back(d);
-        d = d.minusMonths(months);
+    if (stub == StubType::SHORT_FRONT || stub == StubType::LONG_FRONT) {
+        std::int64_t k = 0;
+        LocalDate d = maturity;
+        while (d.isAfter(effectiveDate)) {
+            dates.push_back(d);
+            k++;
+            d = shiftMonths(maturity, -months * k, endOfMonth);
+        }
+        std::reverse(dates.begin(), dates.end());
+        bool hasStub = d != effectiveDate;
+        if (stub == StubType::LONG_FRONT && hasStub && dates.size() >= 2) {
+            dates.erase(dates.begin());
+        }
+    } else {
+        std::int64_t k = 1;
+        LocalDate d = shiftMonths(effectiveDate, months, endOfMonth);
+        while (d.isBefore(maturity)) {
+            dates.push_back(d);
+            k++;
+            d = shiftMonths(effectiveDate, months * k, endOfMonth);
+        }
+        bool hasStub = d != maturity;
+        if (stub == StubType::LONG_BACK && hasStub && !dates.empty()) {
+            dates.pop_back();
+        }
+        dates.push_back(maturity);
     }
-    std::reverse(dates.begin(), dates.end());
     return dates;
+}
+
+LocalDate BusinessCalendar::shiftMonths(const LocalDate& anchor, std::int64_t months,
+                                        bool endOfMonth) {
+    LocalDate d = anchor.plusMonths(months);
+    if (endOfMonth && anchor.day() == LocalDate::lengthOfMonth(anchor.year(), anchor.month())) {
+        return d.atEndOfMonth();
+    }
+    return d;
 }
 
 LocalDate BusinessCalendar::nextBusinessDay(const LocalDate& date) const {

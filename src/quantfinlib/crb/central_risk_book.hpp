@@ -15,11 +15,20 @@
 // Sign convention: positive quantity/notional = the BOOK is long. This is
 // a RISK ledger, not a cash ledger. Deterministic, single-threaded.
 //
+// DEVIATION FROM JAVA: the book keeps each flow, so it can be re-marked.
+// remarkEquity / remarkFx reprice exposures and greeks from a new market and
+// inventoryPnl() gives mark-to-market since booking. Sums across factors
+// (netting efficiency, the report) convert to the book currency first: a
+// million yen is not a million dollars. A rate comes from setFxRate or from
+// the latest booked or marked pair against the book currency; a missing rate
+// throws rather than guessing.
+//
 // DEVIATION FROM JAVA: writeState/readState (persist.Checkpoint section
 // serialization) are NOT ported — see fx/lp_scorecard.hpp for the
 // rationale (no C++ persist.Checkpoint port; out of this task's scope).
 #pragma once
 
+#include <limits>
 #include <map>
 #include <set>
 #include <string>
@@ -51,7 +60,33 @@ public:
         double diversificationBenefit;
     };
 
-    CentralRiskBook() = default;
+    explicit CentralRiskBook(std::string bookCurrency = "USD");
+
+    /** Book-currency value of one unit of `currency`. */
+    void setFxRate(const std::string& currency, double bookPerUnit);
+
+    /**
+     * Re-marks every flow on `symbol`: cash notional and option greeks move
+     * to the new spot. vol NaN keeps each option's vol; yearsElapsed ages
+     * the options, and an expired one drops out of the risk at intrinsic.
+     */
+    void remarkEquity(const std::string& symbol, double spot,
+                      double vol = std::numeric_limits<double>::quiet_NaN(),
+                      double yearsElapsed = 0);
+
+    /** Re-marks every flow on `pair`, as remarkEquity does. */
+    void remarkFx(const std::string& pair, double rate,
+                  double vol = std::numeric_limits<double>::quiet_NaN(),
+                  double yearsElapsed = 0);
+
+    /**
+     * Mark-to-market since booking, in the book currency. FX swaps carry no
+     * mark (their forward points are not re-marked) and contribute 0.
+     */
+    double inventoryPnl() const;
+
+    /** Net exposures in book currency, indexed by registry id. */
+    std::vector<double> bookExposures() const;
 
     /** Cash equity: qty shares (signed) at price. */
     void bookCashEquity(const std::string& desk, const std::string& symbol, double qty,
@@ -135,18 +170,55 @@ public:
     /**
      * The book-level risk report. covariance is over the factor space in
      * REGISTRY ORDER (factors().name(i)) with entries in (factor-return)^2
-     * units matching each factor's exposure units.
+     * units, applied to book-currency exposures.
      */
     CrbReport report(const std::vector<std::vector<double>>& covariance, double confidence) const;
 
 private:
+    enum class FlowKind { CASH_EQUITY, EQUITY_OPTION, FX_LINEAR, FX_SWAP, FX_OPTION };
+
+    struct Leg {
+        int factor;
+        double amount;
+    };
+
+    /** One booked trade: what is needed to reprice it, and the legs it put on the book. */
+    struct Flow {
+        FlowKind kind;
+        std::string desk;
+        std::string key;  // symbol or pair
+        OptionType type = OptionType::CALL;
+        double units = 0;  // shares, or base notional
+        double entry = 0;  // booked price: spot, rate, or option premium per unit
+        double mark = 0;
+        double strike = 0;
+        double rate = 0;
+        double carry = 0;
+        double vol = 0;
+        double time = 0;
+        std::vector<Leg> legs;
+    };
+
     void add(const std::string& desk, const std::string& factor, double amount);
+    void put(Flow& flow, const std::string& factor, double amount);
+    void equityOptionLegs(Flow& flow);
+    void fxOptionLegs(Flow& flow);
+    void remark(Flow& flow, double mark, double vol, double yearsElapsed);
+    static double optionValue(const Flow& flow);
+    double toBook(const std::string& currency) const;
+    double factorToBook(const std::string& factor) const;
+    void learnRate(const std::string& pair, double rate);
+    void addDirect(const std::string& desk, int factor, double amount);
 
     FactorRegistry registry_;
     std::vector<double> net_ = std::vector<double>(16, 0.0);
     std::vector<double> gross_ = std::vector<double>(16, 0.0);
     std::map<std::string, std::vector<double>> deskNet_;
     std::map<std::string, double> pendingFixings_;
+    std::string bookCurrency_;
+    std::map<std::string, double> setRates_;      // from setFxRate: win over learned
+    std::map<std::string, double> learnedRates_;  // from booked or marked pairs
+    std::vector<Flow> flows_;
     long flowsBooked_ = 0;
 };
 

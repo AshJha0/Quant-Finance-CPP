@@ -28,7 +28,8 @@ TEST(constructorValidatesArguments) {
 
 TEST(insideBandIsANoOp) {
     HftRiskGate gate(2);
-    gate.maxOrderQuantity(10000).maxOrderNotional(1e9).maxPositionQuantity(1000000);
+    gate.maxOrderQuantity(10000).maxOrderNotional(1e9).maxPositionQuantity(1000000)
+        .disableReferenceCheck();
     HftOrderGateway gw(gate);
     gate.onFill(0, Side::BUY, 400);   // within a 500 band
 
@@ -40,7 +41,8 @@ TEST(insideBandIsANoOp) {
 
 TEST(breachHedgesTheExcessOverTheBandNotToFlat) {
     HftRiskGate gate(2);
-    gate.maxOrderQuantity(10000).maxOrderNotional(1e9).maxPositionQuantity(1000000);
+    gate.maxOrderQuantity(10000).maxOrderNotional(1e9).maxPositionQuantity(1000000)
+        .disableReferenceCheck();
     HftOrderGateway gw(gate);
     gate.onFill(0, Side::BUY, 800);   // 300 over a 500 band
 
@@ -57,7 +59,8 @@ TEST(breachHedgesTheExcessOverTheBandNotToFlat) {
 
 TEST(shortPositionHedgesWithABuy) {
     HftRiskGate gate(2);
-    gate.maxOrderQuantity(10000).maxOrderNotional(1e9).maxPositionQuantity(1000000);
+    gate.maxOrderQuantity(10000).maxOrderNotional(1e9).maxPositionQuantity(1000000)
+        .disableReferenceCheck();
     HftOrderGateway gw(gate);
     std::vector<Side> sides;
     std::atomic<int> count{0};
@@ -84,7 +87,8 @@ TEST(shortPositionHedgesWithABuy) {
 
 TEST(cooldownSuppressesASecondHedgeUntilItElapses) {
     HftRiskGate gate(2);
-    gate.maxOrderQuantity(10000).maxOrderNotional(1e9).maxPositionQuantity(1000000);
+    gate.maxOrderQuantity(10000).maxOrderNotional(1e9).maxPositionQuantity(1000000)
+        .disableReferenceCheck();
     HftOrderGateway gw(gate);
     gate.onFill(0, Side::BUY, 800);   // 300 over band, stays there (no onFill on hedge)
 
@@ -98,15 +102,17 @@ TEST(cooldownSuppressesASecondHedgeUntilItElapses) {
     EXPECT_TRUE(hedger.hedgesSubmitted() == 1);
     EXPECT_TRUE(hedger.hedgesRejected() == 0);
 
-    // Cooldown elapsed: hedges again.
+    // Cooldown elapsed but the first hedge is still working and covers the
+    // excess. Review finding C2: this used to pin a second, stacked hedge.
     hedger.onTick(0, 100.0, 1, 1001);
-    EXPECT_TRUE(hedger.hedgesSubmitted() == 2);
+    EXPECT_TRUE(hedger.hedgesSubmitted() == 1);
     gw.close();
 }
 
 TEST(neverSentinelDoesNotSuppressTheFirstHedgeNearTimeZeroOrNegative) {
     HftRiskGate gate(2);
-    gate.maxOrderQuantity(10000).maxOrderNotional(1e9).maxPositionQuantity(1000000);
+    gate.maxOrderQuantity(10000).maxOrderNotional(1e9).maxPositionQuantity(1000000)
+        .disableReferenceCheck();
     HftOrderGateway gw(gate);
     gate.onFill(0, Side::BUY, 800);
 

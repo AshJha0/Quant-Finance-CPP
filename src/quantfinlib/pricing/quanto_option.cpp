@@ -13,7 +13,7 @@ namespace {
 constexpr double kInf = std::numeric_limits<double>::infinity();
 
 void validate(double spot, double assetVol, double fxVol, double rho,
-              double domesticRate, double assetYield) {
+              double domesticRate, double foreignRate, double assetYield) {
     if (!(spot > 0) || spot == kInf) {
         throw std::invalid_argument(
                 "spot must be positive and finite, got " + std::to_string(spot));
@@ -25,33 +25,34 @@ void validate(double spot, double assetVol, double fxVol, double rho,
         throw std::invalid_argument(
                 "rho must be in [-1, 1], got " + std::to_string(rho));
     }
-    if (!std::isfinite(domesticRate) || !std::isfinite(assetYield)) {
+    if (!std::isfinite(domesticRate) || !std::isfinite(foreignRate)
+            || !std::isfinite(assetYield)) {
         throw std::invalid_argument("rates must be finite");
     }
 }
 
 }  // namespace
 
-double quantoForward(double spot, double domesticRate, double assetYield,
+double quantoForward(double spot, double foreignRate, double assetYield,
                      double assetVol, double fxVol, double rho, double timeYears) {
-    validate(spot, assetVol, fxVol, rho, domesticRate, assetYield);
+    validate(spot, assetVol, fxVol, rho, 0.0, foreignRate, assetYield);
     if (!(timeYears >= 0) || timeYears == kInf) {
         throw std::invalid_argument("timeYears must be >= 0 and finite");
     }
     return spot * std::exp(
-            (domesticRate - assetYield - rho * assetVol * fxVol) * timeYears);
+            (foreignRate - assetYield - rho * assetVol * fxVol) * timeYears);
 }
 
 double price(OptionType type, double spot, double strike,
-             double domesticRate, double assetYield,
+             double domesticRate, double foreignRate, double assetYield,
              double assetVol, double fxVol, double rho, double timeYears) {
-    validate(spot, assetVol, fxVol, rho, domesticRate, assetYield);
+    validate(spot, assetVol, fxVol, rho, domesticRate, foreignRate, assetYield);
     if (!(strike > 0) || strike == kInf) {
         throw std::invalid_argument(
                 "strike must be positive and finite, got " + std::to_string(strike));
     }
-    return black_scholes::price(type, spot, strike, domesticRate,
-                                assetYield + rho * assetVol * fxVol, assetVol,
+    double carry = assetYield + (domesticRate - foreignRate) + rho * assetVol * fxVol;
+    return black_scholes::price(type, spot, strike, domesticRate, carry, assetVol,
                                 timeYears);
 }
 

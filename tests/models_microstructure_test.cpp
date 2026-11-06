@@ -291,9 +291,10 @@ TEST(avellanedaStoikovShadesLongInventoryDownward) {
 TEST(avellanedaStoikovSpreadNeverBelowTheLiquidityFloor) {
     AvellanedaStoikov as(0.1, 1.5);
     double floor = std::log1p(0.1 / 1.5) / 0.1;
-    // Garbage/zero variance: spread collapses exactly to the liquidity floor.
-    EXPECT_NEAR(as.optimalHalfSpread(-1.0, 100), floor, 1e-12);
-    EXPECT_NEAR(as.optimalHalfSpread(std::nan(""), 100), floor, 1e-12);
+    // Zero variance leaves only the liquidity floor; garbage refuses to quote.
+    EXPECT_NEAR(as.optimalHalfSpread(0.0, 100), floor, 1e-12);
+    EXPECT_THROWS(as.optimalHalfSpread(-1.0, 100));
+    EXPECT_THROWS(as.optimalHalfSpread(std::nan(""), 100));
     // Positive variance widens beyond the floor.
     EXPECT_TRUE(as.optimalHalfSpread(1e-6, 3600) > floor);
     EXPECT_THROWS(AvellanedaStoikov(0, 1.5));

@@ -15,7 +15,9 @@ namespace vwap_scheduler {
 
 /**
  * @param totalQty       parent order quantity
- * @param volumeProfile  expected volume per bucket (any positive scale)
+ * @param volumeProfile  expected volume per bucket (any positive scale);
+ *                       an all-zero profile throws: it says nothing about
+ *                       when to trade, so there is nothing to follow
  * @param durationMillis total execution window; slice i starts at
  *                       i * duration / buckets
  */
@@ -24,9 +26,17 @@ std::vector<Slice> schedule(std::int64_t totalQty, const std::vector<double>& vo
 
 /**
  * Largest-remainder proportional allocation: integer quantities that sum
- * exactly to `total`, proportional to `weights`.
+ * exactly to `total`, proportional to `weights`. Weights summing to zero throw.
  */
 std::vector<std::int64_t> allocateProportionally(std::int64_t total, const std::vector<double>& weights);
+
+/**
+ * Rounds a schedule to whole lots without losing shares: each slice takes
+ * the lots its cumulative quantity has earned, the part below one lot
+ * carries into the next slice, and the last slice takes the odd remainder.
+ * The total is unchanged.
+ */
+std::vector<Slice> roundToLots(const std::vector<Slice>& slices, std::int64_t lotSize);
 
 }  // namespace vwap_scheduler
 }  // namespace quantfinlib

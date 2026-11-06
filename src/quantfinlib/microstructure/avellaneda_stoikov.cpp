@@ -1,7 +1,6 @@
 #include "quantfinlib/microstructure/avellaneda_stoikov.hpp"
 
 #include <cmath>
-#include <limits>
 #include <stdexcept>
 
 namespace quantfinlib {
@@ -17,6 +16,9 @@ AvellanedaStoikov::AvellanedaStoikov(double gamma, double kappa) : gamma_(gamma)
 double AvellanedaStoikov::reservationPrice(double mid, double inventory,
                                            double priceVariancePerSecond,
                                            double horizonSeconds) const {
+    if (!std::isfinite(mid) || !std::isfinite(inventory)) {
+        throw std::invalid_argument("mid and inventory must be finite");
+    }
     return mid - inventory * gamma_ * varianceTerm(priceVariancePerSecond, horizonSeconds);
 }
 
@@ -38,10 +40,9 @@ double AvellanedaStoikov::askQuote(double mid, double inventory, double priceVar
 }
 
 double AvellanedaStoikov::varianceTerm(double priceVariancePerSecond, double horizonSeconds) {
-    double inf = std::numeric_limits<double>::infinity();
-    if (!(priceVariancePerSecond > 0) || !(horizonSeconds > 0) || priceVariancePerSecond == inf
-        || horizonSeconds == inf) {
-        return 0;
+    if (!(priceVariancePerSecond >= 0) || !(horizonSeconds >= 0)
+        || !std::isfinite(priceVariancePerSecond) || !std::isfinite(horizonSeconds)) {
+        throw std::invalid_argument("variance and horizon must be finite and >= 0");
     }
     return priceVariancePerSecond * horizonSeconds;
 }

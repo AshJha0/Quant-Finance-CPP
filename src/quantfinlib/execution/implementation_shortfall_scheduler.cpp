@@ -39,7 +39,7 @@ std::vector<Slice> schedule(const AlmgrenChriss::Params& params, std::int64_t du
     if (durationMillis < 0 || durationMillis > std::numeric_limits<std::int64_t>::max() / n) {
         throw std::invalid_argument("durationMillis out of range for " + std::to_string(n) + " slices");
     }
-    auto parent = static_cast<std::int64_t>(std::lround(params.totalShares));
+    auto parent = static_cast<std::int64_t>(std::llround(params.totalShares));
     std::vector<std::int64_t> quantities = vwap_scheduler::allocateProportionally(parent, weights);
     std::vector<Slice> out;
     out.reserve(weights.size());

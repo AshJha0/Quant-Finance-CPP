@@ -25,7 +25,7 @@ double historicalVar(const std::vector<double>& returns, double confidence);
 /** Parametric (Gaussian) VaR at the given confidence level. */
 double parametricVar(const std::vector<double>& returns, double confidence);
 
-/** Conditional VaR / Expected Shortfall: mean loss beyond the VaR threshold. */
+/** Conditional VaR / Expected Shortfall: the Acerbi-Tasche estimator of tail_risk, floored at 0. */
 double conditionalVar(const std::vector<double>& returns, double confidence);
 
 /** Alias for conditionalVar. */

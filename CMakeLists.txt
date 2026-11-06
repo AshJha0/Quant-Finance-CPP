@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(quant_finance_cpp VERSION 1.0.0 LANGUAGES CXX)
+project(quant_finance_cpp VERSION 2.0.0 LANGUAGES CXX)
 
 # C++ port of Quant-Finance-Library (Java). Zero external dependencies:
 # the standard library only, tests on a vendored micro-harness.
@@ -27,6 +27,10 @@ endif()
 # One test executable per tests/*_test.cpp, registered with CTest.
 enable_testing()
 file(GLOB QFL_TESTS CONFIGURE_DEPENDS tests/*_test.cpp)
+# The allocation test replaces operator new, which TSan also defines.
+if(CMAKE_CXX_FLAGS MATCHES "fsanitize=thread")
+    list(FILTER QFL_TESTS EXCLUDE REGEX "ull_allocation_test")
+endif()
 foreach(test_src ${QFL_TESTS})
     get_filename_component(test_name ${test_src} NAME_WE)
     add_executable(${test_name} ${test_src})
@@ -34,6 +38,16 @@ foreach(test_src ${QFL_TESTS})
     target_include_directories(${test_name} PRIVATE tests)
     add_test(NAME ${test_name} COMMAND ${test_name})
 endforeach()
+
+option(QFL_FUZZ "Build libFuzzer targets (needs clang)" OFF)
+if(QFL_FUZZ)
+    add_subdirectory(fuzz)
+endif()
+
+# The IEX replay tool, not a test: see docs/REPLAY_VALIDATION.md.
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tools/replay/CMakeLists.txt)
+    add_subdirectory(tools/replay)
+endif()
 
 # One benchmark executable per benchmarks/*_bench.cpp (built, never run by
 # CTest: nanosecond numbers belong to a quiet, manually invoked machine).

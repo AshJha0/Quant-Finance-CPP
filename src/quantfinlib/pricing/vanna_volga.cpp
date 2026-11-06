@@ -42,7 +42,7 @@ VannaVolga VannaVolga::ofPillars(const std::vector<double>& strikes,
 }
 
 double VannaVolga::price(OptionType type, double spot, double strike) const {
-    if (spot <= 0 || strike <= 0) {
+    if (!(spot > 0) || !(strike > 0)) {
         throw std::invalid_argument("spot and strike must be > 0");
     }
     double atm = vols_[1];

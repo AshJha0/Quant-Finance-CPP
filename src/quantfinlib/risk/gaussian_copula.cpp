@@ -78,42 +78,7 @@ void GaussianCopula::requireLength(const std::vector<double>& a) const {
 }
 
 GaussianCopula::Matrix GaussianCopula::cholesky(const Matrix& matrix) {
-    int n = static_cast<int>(matrix.size());
-    // The pivot tolerance is RELATIVE to the matrix's own diagonal
-    // scale: correlation matrices (diag 1) factor exactly as before,
-    // and genuinely positive-definite covariances quoted in small
-    // units are not rejected (a 0.5bp-daily-vol factor has variance
-    // ~2.5e-9; an absolute 1e-12 floor called a valid pair of them
-    // "not positive-definite").
-    double maxDiag = 0;
-    for (int i = 0; i < n; i++) {
-        if (static_cast<int>(matrix[i].size()) != n) {
-            throw std::invalid_argument("matrix must be square");
-        }
-        maxDiag = std::max(maxDiag, std::fabs(matrix[i][i]));
-    }
-    // Double.MIN_NORMAL == std::numeric_limits<double>::min().
-    double pivotFloor = 1e-12 * std::max(maxDiag, std::numeric_limits<double>::min());
-    Matrix l(n, std::vector<double>(n, 0.0));
-    for (int i = 0; i < n; i++) {
-        for (int j = 0; j <= i; j++) {
-            double sum = matrix[i][j];
-            for (int k = 0; k < j; k++) {
-                sum -= l[i][k] * l[j][k];
-            }
-            if (i == j) {
-                if (!(sum > pivotFloor)) {
-                    throw std::invalid_argument(
-                            "matrix is not positive-definite (pivot "
-                            + std::to_string(i) + " = " + std::to_string(sum) + ")");
-                }
-                l[i][j] = std::sqrt(sum);
-            } else {
-                l[i][j] = sum / l[j][j];
-            }
-        }
-    }
-    return l;
+    return math_utils::choleskyStrict(matrix);
 }
 
 }  // namespace quantfinlib

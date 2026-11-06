@@ -17,7 +17,7 @@ double d2(double spot, double strike, double rate, double carry,
 }
 
 void validate(double spot, double strike, double vol, double t) {
-    if (spot <= 0 || strike <= 0 || vol <= 0 || t < 0) {
+    if (!(spot > 0) || !(strike > 0) || !(vol > 0) || !(t >= 0)) {
         throw std::invalid_argument(
                 "spot, strike, vol must be > 0 and timeYears >= 0");
     }

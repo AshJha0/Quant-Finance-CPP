@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 
+#include "quantfinlib/risk/tail_risk.hpp"
 #include "quantfinlib/util/math_utils.hpp"
 
 namespace quantfinlib {
@@ -29,16 +30,11 @@ double parametricVar(const std::vector<double>& returns, double confidence) {
 }
 
 double conditionalVar(const std::vector<double>& returns, double confidence) {
-    double threshold = math_utils::percentile(returns, 1 - confidence);
-    double sum = 0;
-    int count = 0;
-    for (double r : returns) {
-        if (r <= threshold) {
-            sum += r;
-            count++;
-        }
+    std::vector<double> losses(returns.size());
+    for (std::size_t i = 0; i < returns.size(); i++) {
+        losses[i] = -returns[i];
     }
-    return count == 0 ? 0 : std::max(0.0, -sum / count);
+    return std::max(0.0, tail_risk::of(losses, confidence).expectedShortfall);
 }
 
 double expectedShortfall(const std::vector<double>& returns, double confidence) {

@@ -26,11 +26,38 @@ public:
                               double strike, double rate, double carry,
                               double expiryYears);
 
+        /**
+         * The forward at a quoted expiry. When any are given, all quoted
+         * expiries need one, and the calendar scan compares at equal
+         * log-moneyness rather than equal strike.
+         */
+        Builder& forward(double expiryYears, double forwardValue);
+
+        /**
+         * Opt-in: build() throws std::invalid_argument on calendar arbitrage
+         * (scanned on gridPoints) and, for expiries with a forward, on
+         * butterfly arbitrage between quoted strikes: undiscounted call
+         * prices must be decreasing and convex across the pillars. Pillars are
+         * tested rather than the interpolated smile, whose kinks are artefacts.
+         */
+        Builder& rejectArbitrage(int gridPoints = 41);
+
         /** Throws std::runtime_error (Java IllegalStateException) when empty. */
         VolSurface build() const;
 
     private:
         std::map<double, std::map<double, double>> smiles_;
+        std::map<double, double> forwards_;
+        int arbitrageGrid_ = 0;  // 0 = no check at build
+    };
+
+    /** Total variance falls between two expiries at this log-moneyness. */
+    struct CalendarViolation {
+        double expiry1;
+        double expiry2;
+        double logMoneyness;
+        double totalVariance1;
+        double totalVariance2;
     };
 
     static Builder builder();
@@ -48,18 +75,39 @@ public:
     /** Smile slope between two strikes, in vol points per unit of strike. */
     double skew(double expiryYears, double strikeLow, double strikeHigh) const;
 
+    /**
+     * Calendar-arbitrage scan: for each pair of consecutive quoted expiries,
+     * total variance must not fall at any of gridPoints log-moneyness points
+     * spanning both smiles. Empty means none found on the grid. The surface
+     * itself enforces nothing.
+     */
+    std::vector<CalendarViolation> calendarViolations(int gridPoints) const;
+
+    /**
+     * Smallest butterfly density d2C/dK2 (undiscounted Black call) over n
+     * strikes of one quoted smile. Negative means butterfly arbitrage. Kinks
+     * of the linear interpolation show as spikes; the slope change itself is
+     * arbitrageable.
+     */
+    double minimumDensity(double expiryYears, double forward, int n) const;
+
     std::vector<double> expiries() const;
 
     /** Pillar strikes at an exact quoted expiry; throws if the expiry is unknown. */
     std::vector<double> strikes(double expiryYears) const;
 
 private:
-    explicit VolSurface(std::map<double, std::map<double, double>> smiles);
+    VolSurface(std::map<double, std::map<double, double>> smiles,
+               std::map<double, double> forwards);
+
+    double logMoneyness(double t, double strike) const;
+    double fromMoneyness(double t, double x) const;
 
     /** Linear in strike inside the smile; flat beyond the quoted wings. */
     static double smileVol(const std::map<double, double>& smile, double strike);
 
     std::map<double, std::map<double, double>> smiles_;  // expiry -> (strike -> vol)
+    std::map<double, double> forwards_;                  // expiry -> forward, or empty
 };
 
 }  // namespace quantfinlib

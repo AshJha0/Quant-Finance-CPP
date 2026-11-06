@@ -45,8 +45,12 @@ double stressCalibratedEs(double esCurrentFull, double esStressedReduced,
         throw std::invalid_argument(
                 "ES inputs must be non-negative and finite (current reduced > 0)");
     }
-    double ratio = std::max(1.0, esStressedReduced / esCurrentReduced);
-    return esCurrentFull * ratio;
+    if (esCurrentReduced < MIN_REDUCED_SET_COVERAGE * esCurrentFull) {
+        throw std::invalid_argument(
+                "reduced factor set explains " + std::to_string(esCurrentReduced / esCurrentFull)
+                + " of full-set current ES; MAR33.5(2) needs >= 0.75");
+    }
+    return esStressedReduced * std::max(1.0, esCurrentFull / esCurrentReduced);
 }
 
 TrafficLight trafficLightOf(int exceptions250d) {

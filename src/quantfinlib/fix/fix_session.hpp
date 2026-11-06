@@ -6,13 +6,29 @@
 // reverse, on the venue side). Zero dependencies beyond the platform socket
 // API (winsock2 on Windows, BSD sockets elsewhere).
 //
+// Session gate: the first inbound message must be a Logon, every message
+// must carry the configured CompIDs, and anything else ends the connection
+// before the application sees it. Garbled frames (bad checksum or body
+// length) are ignored as the spec requires, up to a small consecutive limit.
+//
+// Shutdown: close() only shuts the socket down, which wakes the reader; the
+// descriptor itself is closed once, in the destructor, after both threads
+// have been joined. Sends are bounded by Config::sendTimeoutMillis, and the
+// watchdog never waits for the write lock.
+//
 // Gap recovery: inbound gaps trigger a ResendRequest(2) and out-of-order
 // messages are dropped until redelivered; inbound ResendRequests are
 // serviced from an in-session message store -- application messages are
 // replayed with PossDupFlag(43)/OrigSendingTime(122) and admin runs are
 // coalesced into SequenceReset-GapFill(4). Duplicates (PossDup below the
 // expected seqnum) are suppressed; a too-low seqnum without PossDup
-// disconnects the session.
+// disconnects the session. A GapFill obeys MsgSeqNum like any message and is
+// only honored as part of a resend. Order messages (35=D/F/G) older than
+// Config::maxOrderReplayAgeSeconds are gap-filled, never replayed.
+// SequenceReset-Reset (no GapFillFlag) is refused unless the config opts in.
+//
+// An inbound message is dispatched before its sequence number is persisted,
+// so a crash re-requests it (at-least-once) instead of losing a fill.
 //
 // Persistence: sessions default to an in-memory FixSessionStore (sequence
 // numbers reset per connection); pass a FileSessionStore to the
@@ -42,6 +58,7 @@
 #include "quantfinlib/fix/fix_message.hpp"
 #include "quantfinlib/fix/fix_session_store.hpp"
 #include "quantfinlib/fix/new_order_single.hpp"
+#include "quantfinlib/fix/order_cancel_reject.hpp"
 #include "quantfinlib/fix/order_cancel_replace_request.hpp"
 #include "quantfinlib/fix/order_cancel_request.hpp"
 #include "quantfinlib/orderbook/side.hpp"
@@ -71,7 +88,7 @@ public:
 private:
     friend class FixSession;
 
-    std::intptr_t fd_;
+    std::atomic<std::intptr_t> fd_;
     int port_;
 };
 
@@ -84,6 +101,12 @@ public:
         std::optional<std::string> username;
         std::optional<std::string> password;
         bool resetOnLogon = false;
+        /** A send that cannot finish within about this long disconnects. */
+        int sendTimeoutMillis = 5000;
+        /** D/F/G messages older than this are gap-filled on a ResendRequest. */
+        int maxOrderReplayAgeSeconds = 60;
+        /** Honor SequenceReset-Reset, the manual disaster-recovery jump. */
+        bool allowSequenceResetMode = false;
 
         /** Throws std::invalid_argument if heartbeatSeconds < 1. */
         Config(std::string senderCompId_, std::string targetCompId_, int heartbeatSeconds_);
@@ -97,12 +120,30 @@ public:
          * reconnect when the two sides' stores have diverged beyond repair.
          */
         Config withResetOnLogon() const;
+
+        /** Throws std::invalid_argument if millis < 1. */
+        Config withSendTimeout(int millis) const;
+
+        /** Throws std::invalid_argument if seconds < 0. */
+        Config withMaxOrderReplayAge(int seconds) const;
+
+        /** Accepts SequenceReset-Reset; the jump is reported through onSequenceGap. */
+        Config withSequenceResetMode() const;
     };
 
     /** Session callbacks; invoked on the session's reader thread. */
     class Listener {
     public:
         virtual ~Listener() = default;
+
+        /**
+         * Acceptor only, before any reply or sequence reset: inspect the
+         * Logon (Username/Password) and return false to refuse it.
+         */
+        virtual bool authenticateLogon(const FixMessage& logon) {
+            (void)logon;
+            return true;
+        }
 
         virtual void onLogon(FixSession& session) {
             (void)session;
@@ -131,6 +172,24 @@ public:
                                           const OrderCancelReplaceRequest& request) {
             (void)session;
             (void)request;
+        }
+
+        virtual void onOrderCancelReject(FixSession& session, const OrderCancelReject& reject) {
+            (void)session;
+            (void)reject;
+        }
+
+        /**
+         * An application message could not be read, or a callback for it
+         * threw. The session answers with a Reject and moves past the
+         * sequence number, so this is the only sign left that, say, a fill
+         * was lost. A trading listener must treat it as a fault.
+         */
+        virtual void onApplicationFault(FixSession& session, const FixMessage& message,
+                                        const std::string& reason) {
+            (void)session;
+            (void)message;
+            (void)reason;
         }
 
         /** Session-level Reject (35=3) received from the peer. */
@@ -167,7 +226,8 @@ public:
     FixSession(const FixSession&) = delete;
     FixSession& operator=(const FixSession&) = delete;
 
-    /** Connects, sends Logon, and blocks until the handshake completes. Throws std::runtime_error. */
+    /** Connects, sends Logon, and blocks until the handshake completes. Throws std::runtime_error
+     *  on timeout or if the session dies before it is established. */
     static std::unique_ptr<FixSession> initiate(const std::string& host, int port,
                                                  const Config& config, Listener& listener);
 
@@ -176,7 +236,8 @@ public:
                                                  const Config& config, Listener& listener,
                                                  std::shared_ptr<FixSessionStore> store);
 
-    /** Accepts one connection, awaits the peer's Logon, replies, and returns established. */
+    /** Accepts one connection, awaits the peer's Logon, replies, and returns established.
+     *  Throws std::runtime_error on timeout or if the Logon is refused. */
     static std::unique_ptr<FixSession> accept(FixServerSocket& server, const Config& config,
                                                Listener& listener);
 
@@ -211,6 +272,9 @@ public:
                                         std::int64_t quantity, double limitPrice,
                                         char timeInForce);
 
+    /** Venue side: refuses a cancel or replace (35=9). */
+    void sendOrderCancelReject(const OrderCancelReject& reject);
+
     /** Sends a session-level Reject (35=3) referring to an inbound message. */
     void sendReject(std::int64_t refSeqNum, const std::string& text);
 
@@ -224,6 +288,12 @@ public:
     /** Next incoming sequence number this session expects (for diagnostics/tests). */
     std::int64_t expectedIncomingSeqNum() const {
         return expectedIncomingSeq_.load();
+    }
+
+    /** Safe from any thread, any number of times. Listener callbacks may call it. */
+    /** True while a TestRequest awaits the Heartbeat carrying its TestReqID. */
+    bool testRequestOutstanding() const {
+        return testRequestPending_.load();
     }
 
     void close();
@@ -248,11 +318,20 @@ private:
                       const std::optional<std::string>& origSendingTime);
     void readerLoop();
     void handle(const FixMessage& m);
-    void dispatchApp(std::int64_t seq, const std::function<void()>& dispatch);
-    void handleSequenceReset(const FixMessage& m);
+    void dispatchApp(const FixMessage& m, std::int64_t seq,
+                     const std::function<void()>& dispatch);
+    void dispatch(const FixMessage& m, std::int64_t seq, bool resetApplied);
+    void handleSequenceReset(const FixMessage& m, std::int64_t seq);
     void applyLogonSeqReset();
     void advanceIncoming(std::int64_t newExpected);
-    void handleResendRequest(const FixMessage& m);
+    void requestResend(std::int64_t expected, std::int64_t received);
+    void tooLow(std::int64_t expected, std::int64_t seq);
+    void protocolFailure(const std::string& reason);
+    void handleResendRequest(const FixMessage& m, std::int64_t seq);
+    bool isStaleOrder(const FixSessionStore::StoredMessage& stored) const;
+    void sendLocked(const FixMessage::Builder& builder);
+    void trySend(const FixMessage::Builder& builder);
+    void shutdownSocket();
     void sendGapFill(std::int64_t seq, std::int64_t newSeqNo);
     void heartbeatLoop();
     void disconnect(const std::string& reason);
@@ -275,6 +354,8 @@ private:
     std::mutex logonMutex_;
     std::condition_variable logonCv_;
     bool logonDone_ = false;
+    bool logonSucceeded_ = false;
+    std::string failureReason_;
 
     std::mutex logoutMutex_;
     std::condition_variable logoutCv_;
@@ -288,11 +369,18 @@ private:
     std::atomic<std::int64_t> lastSentNanos_{0};
     std::atomic<std::int64_t> lastReceivedNanos_{0};
     std::atomic<bool> testRequestPending_{false};
+    std::atomic<std::int64_t> testRequestId_{0};
+    std::int64_t testRequestSentNanos_ = 0;     // heartbeat thread only
+    std::atomic<bool> socketShutdown_{false};
+
+    std::mutex stopMutex_;
+    std::condition_variable stopCv_;
 
     std::shared_ptr<FixSessionStore> store_;
     std::int64_t outgoingSeq_ = 0;              // guarded by writeMutex_
     std::atomic<std::int64_t> expectedIncomingSeq_{0};  // written by reader thread only
     bool resendPending_ = false;             // reader thread only
+    bool gapFillWindow_ = false;             // reader thread only: a resend reply may still arrive
     std::int64_t resendTriggerSeq_ = 0;      // reader thread only
     const bool sentResetLogon_;              // this side initiated the 141=Y reset
 

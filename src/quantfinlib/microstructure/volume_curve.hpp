@@ -11,6 +11,7 @@
 // 1, matching Java's VolumeCurve.writeState/readState byte for byte.
 #pragma once
 
+#include <cstdint>
 #include <vector>
 
 #include "quantfinlib/persist/checkpoint.hpp"
@@ -29,7 +30,7 @@ public:
     VolumeCurve& seedProfile(const std::vector<double>& volumesPerBucket);
 
     /** Market volume observed in `bucket` (call as prints arrive). */
-    void onVolume(int bucket, long qty);
+    void onVolume(int bucket, std::int64_t qty);
 
     /** Closes the session: folds today into the learned profile and resets intraday state. */
     void rollDay();

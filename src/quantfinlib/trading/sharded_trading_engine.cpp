@@ -73,6 +73,8 @@ bool ShardedTradingEngine::publish(int handle, double price, double size,
     const std::vector<int>& ids = localIdOf_[static_cast<std::size_t>(handle)];
     bool all = true;
     for (std::size_t i = 0; i < shards.size(); i++) {
+        // The gate's collar reference follows the feed; a bad price is ignored there.
+        gates_[static_cast<std::size_t>(shards[i])]->setReferencePrice(ids[i], price);
         all = buses_[static_cast<std::size_t>(shards[i])]->publish(ids[i], price, size,
                                                                      timestampNanos)
               && all;

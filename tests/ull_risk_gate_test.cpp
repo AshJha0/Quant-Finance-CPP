@@ -1,7 +1,7 @@
 // Port of the HftRiskGate behavior pins (Java HftOrderPathTest gate
 // sections): every rejection reason, the reduce-vs-flip position rule
 // ((new ^ cur) < 0 detects sign flips), the NaN reference-price collar
-// skip, halt and the gate-wide kill switch — plus a two-thread onFill
+// rejection, halt and the gate-wide kill switch — plus a two-thread onFill
 // exact-sum test proving the atomic position add loses no updates (the
 // C++ mirror of Java's VarHandle getAndAdd discipline).
 #include "quantfinlib/trading/hft_risk_gate.hpp"
@@ -44,23 +44,27 @@ TEST(cleanOrderPassesAndRejectionReasonsPin) {
     EXPECT_TRUE(gate.rejectionCount(HftRiskGate::OK) == 0);
 }
 
-TEST(nanReferencePriceSkipsTheCollar) {
-    // Symbol 1 never got a reference price (NaN): the collar must not
-    // reject on NaN arithmetic — every comparison with NaN is false, and
-    // the gate tests ref == ref explicitly.
+TEST(nanReferencePriceRejectsUnlessTheCheckIsOff) {
+    // Review finding C4: this test used to pin the skip as intended. Symbol 1
+    // never got a reference price, so the order cannot be collared and must
+    // be refused; the opt-out has to be explicit.
     HftRiskGate gate(4);
-    gate.priceCollarPct(0.0001);  // brutally tight collar
-    EXPECT_TRUE(gate.check(1, Side::BUY, 10, 12345.0) == HftRiskGate::OK);
-    // And an unset collar pct skips the check even with a reference price.
+    gate.maxOrderQuantity(100).maxOrderNotional(1e9).maxPositionQuantity(100)
+        .priceCollarPct(0.0001);  // brutally tight collar
+    EXPECT_TRUE(gate.check(1, Side::BUY, 10, 12345.0) == HftRiskGate::REJECT_PRICE_COLLAR);
     HftRiskGate noCollar(4);
+    noCollar.maxOrderQuantity(100).maxOrderNotional(1e12).maxPositionQuantity(100);
     noCollar.setReferencePrice(0, 100.0);
+    EXPECT_TRUE(noCollar.check(0, Side::BUY, 10, 1e9) == HftRiskGate::REJECT_PRICE_COLLAR);
+    noCollar.disableReferenceCheck();
     EXPECT_TRUE(noCollar.check(0, Side::BUY, 10, 1e9) == HftRiskGate::OK);
     EXPECT_TRUE(gate.referencePrice(1) != gate.referencePrice(1));  // still NaN
 }
 
 TEST(positionCheckAllowsReduceButNotFlip) {
     HftRiskGate gate(2);
-    gate.maxPositionQuantity(1000);
+    gate.maxOrderQuantity(10000).maxOrderNotional(1e9).maxPositionQuantity(1000)
+        .disableReferenceCheck();
 
     // Book two 800-lot buy fills: position 1600, already over the cap.
     gate.onFill(0, Side::BUY, 800);
@@ -89,6 +93,8 @@ TEST(positionCheckAllowsReduceButNotFlip) {
 
 TEST(haltAndKillSwitchesGateEverything) {
     HftRiskGate gate(2);
+    gate.maxOrderQuantity(100).maxOrderNotional(1e9).maxPositionQuantity(100)
+        .disableReferenceCheck();
     gate.halt(0, true);
     EXPECT_TRUE(gate.check(0, Side::BUY, 1, 1.0) == HftRiskGate::REJECT_HALTED);
     EXPECT_TRUE(gate.check(1, Side::BUY, 1, 1.0) == HftRiskGate::OK);  // per-symbol
@@ -115,6 +121,11 @@ TEST(reasonNamesAreStable) {
     EXPECT_TRUE(HftRiskGate::reasonName(HftRiskGate::REJECT_PRICE_COLLAR) == "PRICE_COLLAR");
     EXPECT_TRUE(HftRiskGate::reasonName(HftRiskGate::REJECT_HALTED) == "HALTED");
     EXPECT_TRUE(HftRiskGate::reasonName(HftRiskGate::REJECT_KILLED) == "KILLED");
+    EXPECT_TRUE(HftRiskGate::reasonName(HftRiskGate::REJECT_PRICE) == "INVALID_PRICE");
+    EXPECT_TRUE(HftRiskGate::reasonName(HftRiskGate::REJECT_SYMBOL) == "UNKNOWN_SYMBOL");
+    EXPECT_TRUE(HftRiskGate::reasonName(HftRiskGate::REJECT_SELF_TRADE) == "SELF_TRADE");
+    EXPECT_TRUE(HftRiskGate::reasonName(HftRiskGate::REJECT_ORDER_TABLE) == "ORDER_TABLE_FULL");
+    EXPECT_TRUE(HftRiskGate::reasonName(HftRiskGate::REJECT_ORDER_STATE) == "ORDER_STATE");
     EXPECT_TRUE(HftRiskGate::reasonName(42) == "UNKNOWN(42)");
 }
 

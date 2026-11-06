@@ -26,17 +26,35 @@ void PovTracker::onMarketVolume(std::int64_t qty) {
 void PovTracker::onExecuted(std::int64_t qty) {
     if (qty > 0) {
         executed_ += qty;
+        working_ -= std::min(working_, qty);
+    }
+}
+
+void PovTracker::onSent(std::int64_t qty) {
+    if (qty <= 0) {
+        return;
+    }
+    if (qty > parentQty_ - executed_ - working_) {
+        throw std::logic_error("child order would overfill the parent");
+    }
+    working_ += qty;
+}
+
+void PovTracker::onCancelled(std::int64_t qty) {
+    if (qty > 0) {
+        working_ -= std::min(working_, qty);
     }
 }
 
 std::int64_t PovTracker::dueQuantity() const {
-    std::int64_t remaining = parentQty_ - executed_;
+    std::int64_t committed = executed_ + working_;
+    std::int64_t remaining = parentQty_ - committed;
     if (remaining <= 0) {
         return 0;
     }
     auto target = static_cast<std::int64_t>(participation_ * static_cast<double>(marketVolume_));
-    std::int64_t behind = target - executed_;
-    if (behind < std::max<std::int64_t>(1, minSlice_)) {
+    std::int64_t behind = target - committed;
+    if (behind < std::max<std::int64_t>(1, std::min(minSlice_, remaining))) {
         return 0;
     }
     return std::min(std::min(behind, maxSlice_), remaining);

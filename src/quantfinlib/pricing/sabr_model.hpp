@@ -26,6 +26,14 @@ double impliedVol(double f, double k, double t,
                   double alpha, double beta, double rho, double nu);
 
 /**
+ * Smallest risk-neutral density d2C/dK2 (undiscounted Black call on the Hagan
+ * vol) over n strikes in [kMin, kMax]. Hagan's expansion is not arbitrage-free:
+ * at low strikes and long expiries a negative value means butterfly arbitrage.
+ */
+double minimumDensity(double f, double t, double alpha, double beta, double rho, double nu,
+                      double kMin, double kMax, int n);
+
+/**
  * Calibrates (alpha, rho, nu) with beta fixed, by seeded random search
  * plus shrinking coordinate refinement (derivative-free, deterministic).
  */

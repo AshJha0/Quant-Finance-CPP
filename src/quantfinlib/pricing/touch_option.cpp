@@ -1,5 +1,6 @@
 #include "quantfinlib/pricing/touch_option.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <stdexcept>
 
@@ -11,9 +12,11 @@ namespace touch_option {
 namespace {
 
 void validate(double spot, double barrier, double vol, double t) {
-    if (spot <= 0 || barrier <= 0 || vol <= 0 || t < 0) {
+    if (!(spot > 0) || !(barrier > 0) || !(vol > 0) || !(t >= 0)
+            || !std::isfinite(spot) || !std::isfinite(barrier) || !std::isfinite(vol)
+            || !std::isfinite(t)) {
         throw std::invalid_argument(
-                "spot, barrier, vol must be > 0 and timeYears >= 0");
+                "spot, barrier, vol must be > 0 and timeYears >= 0, all finite");
     }
 }
 
@@ -32,16 +35,20 @@ double hitProbability(double spot, double barrier, double rate,
     double h = std::log(barrier / spot);
     double sq = vol * std::sqrt(timeYears);
     double drift = m * timeYears;
+    // exp(2mh/vol^2) overflows at low vol while the normCdf beside it
+    // underflows; expTimesNormCdf keeps the finite product.
+    double reflect = 2 * m * h / (vol * vol);
+    double p;
     if (h > 0) {
         // Upper barrier: reflect around +h.
-        return math_utils::normCdf((-h + drift) / sq)
-                + std::exp(2 * m * h / (vol * vol))
-                        * math_utils::normCdf((-h - drift) / sq);
+        p = math_utils::normCdf((-h + drift) / sq)
+                + math_utils::expTimesNormCdf(reflect, (-h - drift) / sq);
+    } else {
+        // Lower barrier: mirror image.
+        p = math_utils::normCdf((h - drift) / sq)
+                + math_utils::expTimesNormCdf(reflect, (h + drift) / sq);
     }
-    // Lower barrier: mirror image.
-    return math_utils::normCdf((h - drift) / sq)
-            + std::exp(2 * m * h / (vol * vol))
-                    * math_utils::normCdf((h + drift) / sq);
+    return std::min(p, 1.0);
 }
 
 double oneTouch(double spot, double barrier, double rate, double carry,

@@ -135,15 +135,17 @@ struct SessionFixture {
     std::unique_ptr<FixSession> client;
     std::unique_ptr<FixSession> venue;
 
-    explicit SessionFixture(int heartbeatSeconds) {
+    explicit SessionFixture(int heartbeatSeconds)
+            : SessionFixture(heartbeatSeconds,
+                             FixSession::Config("CLIENT", "VENUE", heartbeatSeconds)) {}
+
+    SessionFixture(int heartbeatSeconds, const FixSession::Config& clientConfig) {
         std::future<std::unique_ptr<FixSession>> accepting =
                 std::async(std::launch::async, [&] {
                     return FixSession::accept(server, FixSession::Config("VENUE", "CLIENT", heartbeatSeconds),
                                               venueEvents);
                 });
-        client = FixSession::initiate("127.0.0.1", server.port(),
-                                      FixSession::Config("CLIENT", "VENUE", heartbeatSeconds),
-                                      clientEvents);
+        client = FixSession::initiate("127.0.0.1", server.port(), clientConfig, clientEvents);
         venue = accepting.get();
     }
 };
@@ -391,7 +393,9 @@ TEST(tooLowSequenceWithoutPossDupDisconnects) {
 }
 
 TEST(hardSequenceResetJumpsExpectedSeqNum) {
-    SessionFixture f(30);
+    // Reset mode is opt-in since the 2026-11-06 review (finding C9); the
+    // default refusal is pinned in fix_session_hardening_test.cpp.
+    SessionFixture f(30, FixSession::Config("CLIENT", "VENUE", 30).withSequenceResetMode());
     f.venue->send(FixMessage::builder(FixMessage::SEQUENCE_RESET)
                           .field(FixMessage::GAP_FILL_FLAG, std::string("N"))
                           .field(FixMessage::NEW_SEQ_NO, static_cast<std::int64_t>(100)));

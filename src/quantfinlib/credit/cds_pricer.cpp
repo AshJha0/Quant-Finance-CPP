@@ -1,5 +1,6 @@
 #include "quantfinlib/credit/cds_pricer.hpp"
 
+#include <cmath>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -26,22 +27,36 @@ void validate(double maturityYears) {
     }
 }
 
+// Calls fn(t, tau) for each premium period: whole grid steps, then a final
+// short stub to the maturity itself, so 1.24y is not priced as 1.0y.
+template <typename Fn>
+void forEachPeriod(double maturityYears, Fn fn) {
+    double dt = CreditCurve::gridStep();
+    int whole = static_cast<int>(std::floor(maturityYears / dt + 1e-9));
+    for (int i = 1; i <= whole; i++) {
+        fn(i * dt, dt);
+    }
+    double stub = maturityYears - whole * dt;
+    if (stub > 1e-9) {
+        fn(maturityYears, stub);
+    }
+}
+
 }  // namespace
 
 double riskyAnnuity(const CreditCurve& credit, const YieldCurve& discount,
                     double maturityYears) {
     validate(maturityYears);
-    double dt = CreditCurve::gridStep();
     double annuity = 0;
     double prevQ = 1;
-    for (double t = dt; t <= maturityYears + 1e-12; t += dt) {
+    forEachPeriod(maturityYears, [&](double t, double tau) {
         double q = credit.survivalProbability(t);
         double df = discount.discountFactor(t);
         // Full period if it survives; half a period of accrual if it
         // defaults inside the period (the standard convention).
-        annuity += dt * df * q + 0.5 * dt * df * (prevQ - q);
+        annuity += tau * df * q + 0.5 * tau * df * (prevQ - q);
         prevQ = q;
-    }
+    });
     return annuity;
 }
 
@@ -57,14 +72,13 @@ double premiumLegPv(const CreditCurve& credit, const YieldCurve& discount,
 double protectionLegPv(const CreditCurve& credit, const YieldCurve& discount,
                        double maturityYears) {
     validate(maturityYears);
-    double dt = CreditCurve::gridStep();
     double pv = 0;
     double prevQ = 1;
-    for (double t = dt; t <= maturityYears + 1e-12; t += dt) {
+    forEachPeriod(maturityYears, [&](double t, double) {
         double q = credit.survivalProbability(t);
         pv += discount.discountFactor(t) * (prevQ - q);
         prevQ = q;
-    }
+    });
     return (1 - credit.recovery()) * pv;
 }
 

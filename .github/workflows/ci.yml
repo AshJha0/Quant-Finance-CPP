@@ -1,0 +1,36 @@
+name: CI
+on:
+  push: { branches: [main] }
+  pull_request:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: gcc-release, cxx: g++, type: Release, flags: "" }
+          - { name: clang-release, cxx: clang++, type: Release, flags: "" }
+          - { name: asan-ubsan, cxx: clang++, type: RelWithDebInfo, flags: "-fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer" }
+          - { name: tsan, cxx: clang++, type: RelWithDebInfo, flags: "-fsanitize=thread" }
+    name: ${{ matrix.name }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.type }} -DCMAKE_CXX_COMPILER=${{ matrix.cxx }} "-DCMAKE_CXX_FLAGS=${{ matrix.flags }}"
+      - run: cmake --build build
+      - run: ctest --test-dir build --output-on-failure -j4 --timeout 400
+  windows-mingw:
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - run: cmake -S . -B build -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release
+      - run: cmake --build build -j4
+      - run: ctest --test-dir build --output-on-failure -j4 --timeout 400

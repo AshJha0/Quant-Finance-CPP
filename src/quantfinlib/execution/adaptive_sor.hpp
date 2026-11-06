@@ -84,9 +84,21 @@ public:
      * expected cost per share and swept best-first at displayed size.
      * Every quoting dark venue gets a contingent probe leg at its
      * midpoint, sized by learned hidden liquidity (or the configured
-     * default while unknown), capped at maxDarkFraction * quantity.
+     * default while unknown), capped at maxDarkFraction * quantity. A venue
+     * through the limit, or with a quote too old or of unknown age, gets
+     * neither lit legs nor dark probes.
+     *
+     * @throws std::invalid_argument on a guard smart_order_router refuses
      */
+    RoutingDecision route(Side side, std::int64_t quantity, const std::vector<VenueQuote>& venues,
+                          const smart_order_router::RouteGuard& guard);
+
+    [[deprecated("routes with no limit and no staleness check; live code passes a RouteGuard")]]
     RoutingDecision route(Side side, std::int64_t quantity, const std::vector<VenueQuote>& venues);
+
+    [[deprecated("the limit and age bound can be switched off here; live code passes a RouteGuard")]]
+    RoutingDecision route(Side side, std::int64_t quantity, const std::vector<VenueQuote>& venues,
+                          double limitPrice, std::int64_t nowNanos, std::int64_t maxQuoteAgeNanos);
 
     /**
      * Fill probability for a PASSIVE child joining a queue with
@@ -97,6 +109,8 @@ public:
                                          double expectedTradedQty);
 
 private:
+    RoutingDecision routeChecked(Side side, std::int64_t quantity, const std::vector<VenueQuote>& venues,
+                                 double limitPrice, std::int64_t nowNanos, std::int64_t maxQuoteAgeNanos);
     std::int64_t darkProbeSize(const int* id, std::int64_t quantity) const;
 
     VenueScorecard& scorecard_;

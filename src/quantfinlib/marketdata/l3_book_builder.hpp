@@ -57,6 +57,13 @@ public:
     int onMessage(const unsigned char* buf, int offset);
 
     /**
+     * Checked form for wire bytes: `available` bytes follow `offset`. A
+     * truncated message or unknown type returns 0 without reading past
+     * them. Use this on anything that came off a socket.
+     */
+    int onMessage(const unsigned char* buf, int offset, int available);
+
+    /**
      * Add order: appends to its level's FIFO. False when the order was
      * dropped (off-band price, exhausted pool, or a duplicate ref -- a
      * feed anomaly that would otherwise corrupt the ref map).

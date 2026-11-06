@@ -28,7 +28,7 @@ YieldCurve flat3() {
 }
 
 std::vector<double> quarterlyGrid(double years) {
-    int n = static_cast<int>(std::lround(years * 4));
+    int n = static_cast<int>(std::llround(years * 4));
     std::vector<double> t(n);
     for (int i = 0; i < n; i++) {
         t[i] = (i + 1) * 0.25;

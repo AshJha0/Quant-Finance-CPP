@@ -17,7 +17,8 @@ namespace fix_parse {
  * Non-negative integer field (quantities, counts). Tolerates a zero
  * fraction ("100.0"); a real fraction or a '-' sign fails loudly --
  * negative quantities are protocol violations that must never parse into
- * silent garbage. Throws std::invalid_argument.
+ * silent garbage. Empty fields, non-digits and overflow fail the same way.
+ * Throws std::invalid_argument.
  */
 std::int64_t parseLong(const std::uint8_t* buf, std::size_t from, std::size_t to);
 
@@ -25,7 +26,7 @@ std::int64_t parseLong(const std::uint8_t* buf, std::size_t from, std::size_t to
  * Numeric field that may legitimately be non-numeric on the wire -- e.g.
  * ClOrdID (tag 11), which is only numeric by OUR encoder's convention;
  * unsolicited venue messages carry counterparty formats. Returns
- * `fallback` on any non-digit instead of throwing: a foreign id must
+ * `fallback` on any non-digit or overflow instead of throwing: a foreign id must
  * never kill the message pump.
  */
 std::int64_t parseLongOrElse(const std::uint8_t* buf, std::size_t from, std::size_t to,
@@ -34,11 +35,12 @@ std::int64_t parseLongOrElse(const std::uint8_t* buf, std::size_t from, std::siz
 /**
  * Price mantissa as a signed scaled long: "1.08505" -> 108505, "-0.5" -> -5
  * (with priceDecimals = 1). Negative prices are real in FX (forward
- * points, negative rates) and must round-trip.
+ * points, negative rates) and must round-trip. Throws std::invalid_argument
+ * on non-digits, no digits or overflow.
  */
 std::int64_t priceMantissa(const std::uint8_t* buf, std::size_t from, std::size_t to);
 
-/** Digits after the decimal point: "1.08505" -> 5; "99" -> 0. */
+/** Digits after the decimal point: "1.08505" -> 5; "99" -> 0. Throws past 18 (NEG_POW10). */
 int priceDecimals(const std::uint8_t* buf, std::size_t from, std::size_t to);
 
 /** 10^-n for n in 0..18: scaled-long -> double conversion without pow(). */

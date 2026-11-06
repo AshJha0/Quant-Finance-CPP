@@ -50,7 +50,32 @@ void BenchmarkExecutor::onMarketVolume(std::int64_t qty) {
 void BenchmarkExecutor::onFill(std::int64_t qty) {
     if (qty > 0) {
         executed_ += qty;
+        working_ -= std::min(working_, qty);
     }
+}
+
+void BenchmarkExecutor::onSent(std::int64_t qty) {
+    if (qty <= 0) {
+        return;
+    }
+    if (qty > parentQty_ - executed_ - working_) {
+        throw std::logic_error("child order would overfill the parent");
+    }
+    working_ += qty;
+}
+
+void BenchmarkExecutor::onCancelled(std::int64_t qty) {
+    if (qty > 0) {
+        working_ -= std::min(working_, qty);
+    }
+}
+
+BenchmarkExecutor& BenchmarkExecutor::withLotSize(std::int64_t lotSize) {
+    if (lotSize < 1) {
+        throw std::invalid_argument("lotSize must be >= 1");
+    }
+    lotSize_ = lotSize;
+    return *this;
 }
 
 double BenchmarkExecutor::clamp01(double x) {
@@ -127,17 +152,29 @@ double BenchmarkExecutor::urgencyMultiplier(const MarketState& m) const {
 }
 
 std::int64_t BenchmarkExecutor::dueQuantity(double scheduleFraction, const MarketState& m) {
-    std::int64_t remaining = parentQty_ - executed_;
+    std::int64_t committed = executed_ + working_;
+    std::int64_t remaining = parentQty_ - committed;
     if (remaining <= 0) {
         return 0;
     }
+    // Fail closed: a depth or schedule we cannot read releases nothing.
+    if (!(m.displayedDepth >= 0)) {
+        return 0;
+    }
+    bool volumeDriven = benchmark_ == Benchmark::PARTICIPATION;
+    if (!volumeDriven && std::isnan(scheduleFraction)) {
+        return 0;
+    }
     double f = clamp01(scheduleFraction);
+    bool horizonOver = !volumeDriven && f >= 1;
 
     std::int64_t behind;
     if (benchmark_ == Benchmark::PARTICIPATION) {
         // Volume-driven: target = participation * others' volume.
         auto target = static_cast<std::int64_t>(participationRate_ * static_cast<double>(marketVolume_));
-        behind = target - executed_;
+        behind = target - committed;
+    } else if (horizonOver) {
+        behind = remaining;
     } else {
         // Target completion by now = curve(progress) * parent. A NaN
         // volume-curve input degrades VWAP to the time fraction -- (long)
@@ -147,7 +184,7 @@ std::int64_t BenchmarkExecutor::dueQuantity(double scheduleFraction, const Marke
         if (std::isnan(targetFrac)) {
             targetFrac = f;
         }
-        behind = static_cast<std::int64_t>(std::lround(targetFrac * static_cast<double>(parentQty_))) - executed_;
+        behind = static_cast<std::int64_t>(std::llround(targetFrac * static_cast<double>(parentQty_))) - committed;
     }
     if (behind <= 0) {
         return 0;
@@ -160,14 +197,20 @@ std::int64_t BenchmarkExecutor::dueQuantity(double scheduleFraction, const Marke
     if (benchmark_ == Benchmark::PARTICIPATION) {
         urgency = std::min(urgency, 1.0);
     }
-    auto shaped = static_cast<std::int64_t>(std::ceil(static_cast<double>(behind) * urgency));
+    auto shaped = horizonOver ? behind
+                              : static_cast<std::int64_t>(std::ceil(static_cast<double>(behind) * urgency));
 
     // Liquidity cap and parent remainder.
     std::int64_t cap = remaining;
     if (m.displayedDepth < std::numeric_limits<double>::infinity()) {
         cap = std::min(cap, static_cast<std::int64_t>(std::floor(maxDepthFraction_ * m.displayedDepth)));
     }
-    return std::max<std::int64_t>(0, std::min(shaped, cap));
+    std::int64_t due = std::max<std::int64_t>(0, std::min(shaped, cap));
+    if (lotSize_ > 1 && due < remaining) {
+        // The tail below one lot goes out whole, not as a stranded leftover.
+        due -= due % lotSize_;
+    }
+    return due;
 }
 
 double BenchmarkExecutor::realizedParticipation() const {

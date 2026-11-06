@@ -1,11 +1,13 @@
 #include "quantfinlib/pricing/sabr_model.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <limits>
 #include <stdexcept>
 
 #include "quantfinlib/pricing/java_random.hpp"
+#include "quantfinlib/util/math_utils.hpp"
 
 namespace quantfinlib {
 namespace sabr_model {
@@ -26,7 +28,7 @@ double sse(double f, double t, double beta, const std::vector<double>& strikes,
 
 double impliedVol(double f, double k, double t,
                   double alpha, double beta, double rho, double nu) {
-    if (f <= 0 || k <= 0 || t <= 0 || alpha <= 0) {
+    if (!(f > 0) || !(k > 0) || !(t > 0) || !(alpha > 0)) {
         throw std::invalid_argument("f, k, t, alpha must be positive");
     }
     double oneMinusBeta = 1 - beta;
@@ -49,6 +51,25 @@ double impliedVol(double f, double k, double t,
             + oneMinusBeta * oneMinusBeta / 24 * logFk * logFk
             + std::pow(oneMinusBeta, 4) / 1920 * std::pow(logFk, 4));
     return alpha / denom * (z / x) * correction;
+}
+
+double minimumDensity(double f, double t, double alpha, double beta, double rho, double nu,
+                      double kMin, double kMax, int n) {
+    if (!(kMin > 0) || !(kMax > kMin) || n < 2) {
+        throw std::invalid_argument("need 0 < kMin < kMax and n >= 2");
+    }
+    auto call = [&](double k) {
+        double sv = impliedVol(f, k, t, alpha, beta, rho, nu) * std::sqrt(t);
+        double d1 = std::log(f / k) / sv + 0.5 * sv;
+        return f * math_utils::normCdf(d1) - k * math_utils::normCdf(d1 - sv);
+    };
+    double lowest = std::numeric_limits<double>::infinity();
+    for (int i = 0; i < n; i++) {
+        double k = kMin + (kMax - kMin) * i / (n - 1);
+        double h = 1e-3 * k;
+        lowest = std::min(lowest, (call(k + h) - 2 * call(k) + call(k - h)) / (h * h));
+    }
+    return lowest;
 }
 
 Params calibrate(double f, double t, double beta,

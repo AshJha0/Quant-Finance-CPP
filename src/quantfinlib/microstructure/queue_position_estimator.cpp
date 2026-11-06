@@ -8,7 +8,7 @@
 
 namespace quantfinlib {
 
-void QueuePositionEstimator::join(long levelSize, long ownQty) {
+void QueuePositionEstimator::join(std::int64_t levelSize, std::int64_t ownQty) {
     if (levelSize < 0 || ownQty <= 0) {
         throw std::invalid_argument("need levelSize >= 0, ownQty > 0");
     }
@@ -19,7 +19,7 @@ void QueuePositionEstimator::join(long levelSize, long ownQty) {
     active_ = true;
 }
 
-void QueuePositionEstimator::onTrade(long tradedQty) {
+void QueuePositionEstimator::onTrade(std::int64_t tradedQty) {
     if (!active_ || tradedQty <= 0) {
         return;
     }
@@ -27,7 +27,7 @@ void QueuePositionEstimator::onTrade(long tradedQty) {
     levelSize_ = std::max(static_cast<double>(ownQty_), levelSize_ - static_cast<double>(tradedQty));
 }
 
-void QueuePositionEstimator::onLevelResize(long newLevelSize) {
+void QueuePositionEstimator::onLevelResize(std::int64_t newLevelSize) {
     if (!active_) {
         return;
     }
@@ -38,6 +38,16 @@ void QueuePositionEstimator::onLevelResize(long newLevelSize) {
         ahead_ = std::max(0.0, ahead_ - removed * fracAhead);
     }
     levelSize_ = std::max(static_cast<double>(ownQty_), static_cast<double>(newLevelSize));
+}
+
+void QueuePositionEstimator::onOwnFill(std::int64_t filledQty) {
+    if (!active_ || filledQty <= 0) {
+        return;
+    }
+    std::int64_t taken = std::min(filledQty, ownQty_);
+    ownQty_ -= taken;
+    levelSize_ = std::max(static_cast<double>(ownQty_), levelSize_ - static_cast<double>(taken));
+    active_ = ownQty_ > 0;
 }
 
 double QueuePositionEstimator::fillProbability(double expectedTradedQty) const {

@@ -12,7 +12,7 @@ namespace {
 
 double pv(double face, double couponRate, int frequency,
           double yearsToMaturity, const YieldCurve& curve, double z) {
-    int n = static_cast<int>(std::lround(yearsToMaturity * frequency));
+    int n = static_cast<int>(std::llround(yearsToMaturity * frequency));
     double coupon = face * couponRate / frequency;
     double value = 0;
     for (int i = 1; i <= n; i++) {

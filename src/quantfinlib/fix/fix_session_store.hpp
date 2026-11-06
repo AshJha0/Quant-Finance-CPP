@@ -41,6 +41,13 @@ public:
 
     /** The stored message at seq, or std::nullopt (admin / never sent). */
     virtual std::optional<StoredMessage> retrieve(std::int64_t seq) = 0;
+
+    /**
+     * Clean slate for ResetSeqNumFlag(141)=Y: both counters back to 1 and
+     * every stored message dropped, so a later ResendRequest can never
+     * replay an order from the abandoned sequence.
+     */
+    virtual void reset() = 0;
 };
 
 /** Fresh in-memory store: per-connection sequence numbers (the default). */
@@ -52,6 +59,7 @@ public:
     void saveIncomingSeq(std::int64_t expectedSeq) override;
     void storeMessage(std::int64_t seq, StoredMessage message) override;
     std::optional<StoredMessage> retrieve(std::int64_t seq) override;
+    void reset() override;
 
 private:
     std::mutex mutex_;

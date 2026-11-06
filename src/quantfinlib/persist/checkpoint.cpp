@@ -1,10 +1,14 @@
 #include "quantfinlib/persist/checkpoint.hpp"
 
 #include <cstring>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <stdexcept>
+
+#include "quantfinlib/persist/durable_file.hpp"
 
 namespace quantfinlib {
 
@@ -80,9 +84,15 @@ double BinReader::readDouble() {
 
 // ------------------------------------------------------------- Writer
 
-Checkpoint::Writer::Writer(std::string target) : target_(std::move(target)) {}
+Checkpoint::Writer::Writer(std::string target)
+        : target_(std::move(target)), uncaughtAtStart_(std::uncaught_exceptions()) {}
 
 Checkpoint::Writer::~Writer() {
+    // Unwinding means the caller never finished the snapshot; committing it
+    // would replace a good checkpoint with a partial one.
+    if (std::uncaught_exceptions() > uncaughtAtStart_) {
+        return;
+    }
     try {
         close();
     } catch (...) {
@@ -92,6 +102,10 @@ Checkpoint::Writer::~Writer() {
 }
 
 Checkpoint::Writer& Checkpoint::Writer::section(const std::string& name, const StateWriter& body) {
+    if (name == CRC_SECTION || name.size() > 0xFFFF) {
+        failed_ = true;
+        throw std::invalid_argument("invalid checkpoint section name: " + name);
+    }
     for (const auto& kv : sections_) {
         if (kv.first == name) {
             failed_ = true;
@@ -105,22 +119,34 @@ Checkpoint::Writer& Checkpoint::Writer::section(const std::string& name, const S
         failed_ = true;
         throw;
     }
+    if (w.bytes().size() > static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max())) {
+        failed_ = true;
+        throw std::invalid_argument("checkpoint section too large: " + name);
+    }
     sections_.emplace_back(name, w.bytes());
     return *this;
 }
 
 namespace {
 
-void putU16BE(std::ofstream& out, std::uint16_t v) {
-    unsigned char b[2] = {static_cast<unsigned char>(v >> 8), static_cast<unsigned char>(v)};
-    out.write(reinterpret_cast<const char*>(b), 2);
+void putU16BE(std::vector<std::uint8_t>& out, std::uint16_t v) {
+    out.push_back(static_cast<std::uint8_t>(v >> 8));
+    out.push_back(static_cast<std::uint8_t>(v));
 }
 
-void putI32BE(std::ofstream& out, std::int32_t v) {
+void putI32BE(std::vector<std::uint8_t>& out, std::int32_t v) {
     std::uint32_t u = static_cast<std::uint32_t>(v);
-    unsigned char b[4] = {static_cast<unsigned char>(u >> 24), static_cast<unsigned char>(u >> 16),
-                          static_cast<unsigned char>(u >> 8), static_cast<unsigned char>(u)};
-    out.write(reinterpret_cast<const char*>(b), 4);
+    for (int shift = 24; shift >= 0; shift -= 8) {
+        out.push_back(static_cast<std::uint8_t>(u >> shift));
+    }
+}
+
+void putSection(std::vector<std::uint8_t>& out, const std::string& name,
+                const std::vector<std::uint8_t>& body) {
+    putU16BE(out, static_cast<std::uint16_t>(name.size()));
+    out.insert(out.end(), name.begin(), name.end());
+    putI32BE(out, static_cast<std::int32_t>(body.size()));
+    out.insert(out.end(), body.begin(), body.end());
 }
 
 }  // namespace
@@ -133,47 +159,47 @@ void Checkpoint::Writer::close() {
     if (failed_) {
         return;
     }
+    std::vector<std::uint8_t> image;
+    putI32BE(image, MAGIC);
+    putI32BE(image, FORMAT_VERSION);
+    for (const auto& kv : sections_) {
+        putSection(image, kv.first, kv.second);
+    }
+    // The trailer is an ordinary section, so format-1 readers in other
+    // languages skip it as a section they never ask for. Its CRC covers
+    // every byte before the trailer's own 4-byte payload.
+    std::string crcName(CRC_SECTION);
+    putU16BE(image, static_cast<std::uint16_t>(crcName.size()));
+    image.insert(image.end(), crcName.begin(), crcName.end());
+    putI32BE(image, 4);
+    putI32BE(image, static_cast<std::int32_t>(crc32(image.data(), image.size())));
+
     std::string temp = target_ + ".tmp";
     std::filesystem::path tempPath(temp);
     if (tempPath.has_parent_path()) {
         std::filesystem::create_directories(tempPath.parent_path());
     }
-    {
-        std::ofstream out(temp, std::ios::binary | std::ios::trunc);
-        if (!out) {
-            throw std::runtime_error("cannot open checkpoint temp file: " + temp);
-        }
-        putI32BE(out, MAGIC);
-        putI32BE(out, FORMAT_VERSION);
-        for (const auto& kv : sections_) {
-            putU16BE(out, static_cast<std::uint16_t>(kv.first.size()));
-            out.write(kv.first.data(), static_cast<std::streamsize>(kv.first.size()));
-            putI32BE(out, static_cast<std::int32_t>(kv.second.size()));
-            if (!kv.second.empty()) {
-                out.write(reinterpret_cast<const char*>(kv.second.data()),
-                          static_cast<std::streamsize>(kv.second.size()));
-            }
-        }
-        if (!out) {
-            out.close();
-            std::error_code rmEc;
-            std::filesystem::remove(temp, rmEc);
-            throw std::runtime_error("failed writing checkpoint temp file: " + temp);
-        }
+    try {
+        DurableFile out(temp, DurableFile::Mode::Truncate);
+        out.writeAt(0, image.data(), image.size());
+        out.sync();
+        out.close();
+    } catch (const std::exception& e) {
+        std::error_code rmEc;
+        std::filesystem::remove(temp, rmEc);
+        throw std::runtime_error("failed writing checkpoint temp file: " + std::string(e.what()));
     }
+    // rename replaces the target atomically. There is deliberately no
+    // remove-then-rename fallback: it would open a window with no checkpoint
+    // at all. On failure the previous checkpoint stays in place.
     std::error_code ec;
     std::filesystem::rename(temp, target_, ec);
     if (ec) {
-        // Filesystem without atomic replace-on-rename: fall back to a
-        // plain remove + rename rather than failing the save (matches the
-        // Java/Python AtomicMoveNotSupportedException fallback).
         std::error_code rmEc;
-        std::filesystem::remove(target_, rmEc);
-        std::filesystem::rename(temp, target_, ec);
-        if (ec) {
-            throw std::runtime_error("failed to commit checkpoint: " + target_ + " (" + ec.message() + ")");
-        }
+        std::filesystem::remove(temp, rmEc);
+        throw std::runtime_error("failed to commit checkpoint: " + target_ + " (" + ec.message() + ")");
     }
+    syncParentDirectory(target_);
 }
 
 // ------------------------------------------------------------- Reader
@@ -199,7 +225,7 @@ Checkpoint::Reader::Reader(const std::string& path) {
         throw std::runtime_error(path + " is not a quantfinlib checkpoint");
     }
     std::int32_t version = readI32(4);
-    if (version > FORMAT_VERSION) {
+    if (version < 1 || version > FORMAT_VERSION) {
         throw std::runtime_error(path + " uses checkpoint format " + std::to_string(version)
                                   + "; this build reads up to " + std::to_string(FORMAT_VERSION));
     }
@@ -225,6 +251,17 @@ Checkpoint::Reader::Reader(const std::string& path) {
         if (length < 0 || pos + static_cast<std::size_t>(length) > n) {
             throw std::runtime_error(path + ": section '" + name + "' declares " + std::to_string(length)
                                       + " bytes, " + std::to_string(n - pos) + " remain");
+        }
+        if (name == CRC_SECTION) {
+            // pos is at the payload; the CRC covers everything before it.
+            if (length != 4 || pos + 4 != n) {
+                throw std::runtime_error(path + ": misplaced integrity trailer");
+            }
+            if (crc32(data.data(), pos) != static_cast<std::uint32_t>(readI32(pos))) {
+                throw std::runtime_error(path + ": checkpoint CRC mismatch, file is corrupt");
+            }
+            verified_ = true;
+            break;
         }
         if (sections_.find(name) == sections_.end()) {
             order_.push_back(name);

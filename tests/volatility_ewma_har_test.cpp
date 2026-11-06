@@ -46,18 +46,21 @@ TEST(ewmaReactsToVolatilityRegimeShift) {
 
 // Port of FormulaPinsTest.ewmaRecursionWeightsPinned.
 TEST(ewmaRecursionWeightsPinned) {
-    // {0.01, -0.02}: seed = sample variance 4.5e-4;
-    // h[1] = 0.94*4.5e-4 + 0.06*0.01^2 = 4.29e-4 (a lambda swap gives 1.21e-4);
-    // next = 0.94*4.29e-4 + 0.06*0.02^2 = 4.2726e-4 -> vol 0.0206703.
+    // Repinned for the causal seed (finding H13), by hand. {0.01, -0.02}:
+    // h[1] = r0^2 = 1e-4 and h[0] = h[1];
+    // next = (0.94*0.06*1e-4 + 0.06*4e-4) / (0.94*0.06 + 0.06) = 2.964e-5 / 0.1164.
+    // The prior form keeps the old recursion: seed 4.5e-4 gives
+    // h[1] = 0.94*4.5e-4 + 0.06*0.01^2 = 4.29e-4 (a lambda swap gives 1.21e-4).
     EwmaVolatility ewma(0.94);
     std::vector<double> h = ewma.variances({0.01, -0.02});
-    EXPECT_NEAR(h[0], 4.5e-4, 1e-15);    // unconditional seed
+    EXPECT_NEAR(h[0], 1e-4, 1e-15);
+    EXPECT_NEAR(h[1], 1e-4, 1e-15);
     // lambda on the OLD variance, 1-lambda on r^2.
-    EXPECT_NEAR(h[1], 4.29e-4, 1e-15);
-    EXPECT_NEAR(ewma.latestVol({0.01, -0.02}), std::sqrt(4.2726e-4), 1e-12);
+    EXPECT_NEAR(ewma.variances({0.01, -0.02}, 4.5e-4)[1], 4.29e-4, 1e-15);
+    EXPECT_NEAR(ewma.latestVol({0.01, -0.02}), std::sqrt(2.964e-5 / 0.1164), 1e-12);
     // annualizedVol = latestVol * sqrt(ppy): 252 periods pins by definition.
     EXPECT_NEAR(ewma.annualizedVol({0.01, -0.02}, 252),
-                std::sqrt(4.2726e-4) * std::sqrt(252.0), 1e-12);
+                std::sqrt(2.964e-5 / 0.1164) * std::sqrt(252.0), 1e-12);
 }
 
 // ---------------------------------------------------------------- HAR-RV

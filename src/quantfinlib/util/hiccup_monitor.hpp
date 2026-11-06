@@ -17,6 +17,8 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -43,7 +45,14 @@ public:
 
     ~HiccupMonitor() { close(); }
 
+    /** No-op while running; after stop() it joins the old thread and restarts. */
     HiccupMonitor& start() {
+        if (running_.load(std::memory_order_acquire)) {
+            return *this;
+        }
+        if (thread_.joinable()) {
+            thread_.join();
+        }
         running_.store(true, std::memory_order_release);
         thread_ = std::thread([this] { sampleLoop(); });
         return *this;
@@ -58,18 +67,29 @@ public:
         }
     }
 
-    /** The hiccup histogram: excess-over-requested sleep time, in nanos. */
+    /**
+     * The hiccup histogram: excess-over-requested sleep time, in nanos. The
+     * recorder is single-writer, so read it only after close(). samples(),
+     * maxHiccupNanos() and summary() are safe while the monitor runs.
+     */
     const LatencyRecorder& recorder() const { return recorder_; }
 
-    std::int64_t samples() const { return recorder_.count(); }
+    std::int64_t samples() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return recorder_.count();
+    }
 
     /** Worst platform stall observed, in nanoseconds. */
-    std::int64_t maxHiccupNanos() const { return recorder_.max(); }
+    std::int64_t maxHiccupNanos() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return recorder_.max();
+    }
 
     std::string summary() const {
         char head[64];
         std::snprintf(head, sizeof(head), "platform hiccups (res=%gms): ",
                       static_cast<double>(resolutionNanos_) / 1000000.0);
+        std::lock_guard<std::mutex> lock(mutex_);
         return std::string(head) + recorder_.summary();
     }
 
@@ -83,11 +103,13 @@ private:
                     std::chrono::duration_cast<std::chrono::nanoseconds>(clock::now() - before)
                             .count()
                     - resolutionNanos_;
+            std::lock_guard<std::mutex> lock(mutex_);   // once per sleep, off any hot path
             recorder_.record(excess > 0 ? excess : 0);
         }
     }
 
     const std::int64_t resolutionNanos_;
+    mutable std::mutex mutex_;
     LatencyRecorder recorder_;
     std::thread thread_;
     std::atomic<bool> running_{false};
