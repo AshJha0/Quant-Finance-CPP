@@ -8,10 +8,14 @@
 //
 // Hedging to the band edge rather than to flat is deliberate: it removes
 // the limit breach with the smallest order, avoids ping-ponging around
-// zero, and matches how dealer books actually run inventory. A cooldown
-// (minHedgeIntervalNanos) stops the hedger from stacking orders while the
-// first hedge's fill is still in flight -- positions only update when
-// fills confirm via HftRiskGate::onFill.
+// zero, and matches how dealer books actually run inventory.
+//
+// Positions only move when fills confirm, so the hedger counts what it has
+// in flight: one working hedge per symbol, whose unfilled quantity comes off
+// the excess. A hedge that already covers the excess sends nothing new. If
+// the excess changes, or the cooldown (minHedgeIntervalNanos) has passed and
+// the price moved, the working hedge is amended in place rather than joined
+// by a second one. Back inside the band, a working hedge is cancelled.
 //
 // Register onTick as a TickListener on the bus (consumer thread), after
 // the strategy/quoter listeners so it sees the same tick they acted on.
@@ -46,6 +50,12 @@ public:
     /** Hedge attempts refused (risk gate or full ring) -- monitor this. */
     std::int64_t hedgesRejected() const { return hedgesRejected_; }
 
+    /** Working hedges amended to a new size or price. */
+    std::int64_t hedgesAmended() const { return hedgesAmended_; }
+
+    /** Ticks where a breach was already covered by quantity in flight. */
+    std::int64_t hedgesCovered() const { return hedgesCovered_; }
+
 private:
     /** Sentinel: no hedge sent yet -- the cooldown must not apply. */
     static constexpr std::int64_t NEVER = std::numeric_limits<std::int64_t>::min();
@@ -56,9 +66,14 @@ private:
     const std::int64_t minHedgeIntervalNanos_;
 
     std::vector<std::int64_t> lastHedgeNanos_;   // NEVER until the first hedge
+    std::vector<std::int64_t> hedgeOrder_;       // working hedge, 0 = none
+    std::vector<Side> hedgeSide_;
+    std::vector<double> hedgePrice_;
 
     std::int64_t hedgesSubmitted_ = 0;
     std::int64_t hedgesRejected_ = 0;
+    std::int64_t hedgesAmended_ = 0;
+    std::int64_t hedgesCovered_ = 0;
 };
 
 }  // namespace quantfinlib

@@ -17,6 +17,13 @@
 // wire: a re-quote is suppressed unless the mid moved at least minMove OR
 // minRequoteIntervalNanos elapsed. Suppression is counted, never silent.
 //
+// One working order per side. The first tick submits; later ticks amend the
+// same order with HftOrderGateway::replace, so a quoter never has more than
+// two orders out per symbol. While the previous request is unanswered the
+// side simply waits for a later tick (counted in pendingSides). A filled or
+// cancelled side is submitted afresh. A tick whose price is not finite and
+// positive pulls both quotes rather than pricing off it.
+//
 // Register onTick as a TickListener on the bus (runs on the consumer
 // thread), exactly like a strategy. Single-threaded by construction; the
 // per-symbol state arrays are indexed by dense symbol id.
@@ -135,8 +142,23 @@ public:
     /** Individual sides refused by the risk gate or a full ring. */
     std::int64_t rejectedSides() const { return rejectedSides_; }
 
+    /** Sides left as they are because the previous amend is unanswered. */
+    std::int64_t pendingSides() const { return pendingSides_; }
+
+    /** Ticks refused for an unusable price or symbol id. */
+    std::int64_t badTicks() const { return badTicks_; }
+
+    /** The order last placed on one side; 0 if none. */
+    std::int64_t workingOrder(int symbolId, Side side) const {
+        auto i = static_cast<std::size_t>(symbolId);
+        return side == Side::BUY ? bidOrder_[i] : askOrder_[i];
+    }
+
 private:
     void apply(int symbolId, const Config& config);
+    void quoteSide(std::int64_t& order, double& quoted, int symbolId, Side side,
+                   std::int64_t size, double price, std::int64_t timestampNanos);
+    void pullQuotes(int symbolId, std::int64_t timestampNanos);
 
     HftOrderGateway& gateway_;
     HftRiskGate& riskGate_;
@@ -150,10 +172,16 @@ private:
 
     std::vector<double> lastQuoteMid_;      // NaN = never quoted
     std::vector<std::int64_t> lastQuoteNanos_;
+    std::vector<std::int64_t> bidOrder_;    // 0 = none
+    std::vector<std::int64_t> askOrder_;
+    std::vector<double> bidQuoted_;
+    std::vector<double> askQuoted_;
 
     std::int64_t quoteUpdates_ = 0;
     std::int64_t suppressedUpdates_ = 0;
     std::int64_t rejectedSides_ = 0;
+    std::int64_t pendingSides_ = 0;
+    std::int64_t badTicks_ = 0;
 };
 
 }  // namespace quantfinlib

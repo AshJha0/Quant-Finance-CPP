@@ -1,10 +1,9 @@
 // Port of the Java GlobalRiskAggregator behavior pins: gross notional is
 // summed across every gate's positions x reference price (NaN-safe), a
-// breach kills EVERY gate and trips exactly once, recovery is hysteretic
-// (resumes only below cap x resumeFraction, not merely below cap), and a
-// gate that was ALREADY killed before the trip (an ops hold, a second
-// breaker) stays killed after the aggregator's own recovery -- the
-// killedBeforeTrip snapshot pin.
+// breach kills EVERY gate and trips exactly once. Review finding C5 changed
+// recovery: the trip now latches, and manualReset() is refused until gross is
+// below cap x resumeFraction, so the old auto-resume pins became reset pins.
+// A gate already killed by another source stays killed through that reset.
 #include "quantfinlib/trading/global_risk_aggregator.hpp"
 
 #include <chrono>
@@ -38,7 +37,8 @@ TEST(grossNotionalSumsAbsPositionTimesReferencePriceNanSafe) {
     g1.setReferencePrice(0, 5.0);
 
     GlobalRiskAggregator agg({&g0, &g1}, 1e9, 0.9, POLL_NANOS);
-    // 100*10 + 0 (NaN skipped) + 20*5 = 1100.
+    // 100*10 + 0 (NaN skipped) + 20*5 = 1100. The unpriced position adds
+    // nothing here but trips the breaker: see lane_fail_closed_test.
     EXPECT_NEAR(agg.grossNotional(), 1100.0, 1e-9);
     agg.close();
 }
@@ -70,10 +70,16 @@ TEST(recoveryIsHystereticNotJustBelowCap) {
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
     EXPECT_TRUE(agg.isTripped());
     EXPECT_TRUE(g0.isKilled());
+    EXPECT_TRUE(!agg.manualReset());
+    EXPECT_TRUE(agg.isTripped());
 
-    // Reduce further to 2000: below the resume threshold -> recovers.
+    // Reduce further to 2000: below the resume threshold. Still latched until
+    // the operator resets.
     g0.onFill(0, Side::SELL, 20);    // position 20 * 100 = 2000
-    EXPECT_TRUE(waitFor([&] { return !agg.isTripped(); }));
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    EXPECT_TRUE(agg.isTripped());
+    EXPECT_TRUE(agg.manualReset());
+    EXPECT_TRUE(!agg.isTripped());
     EXPECT_TRUE(!g0.isKilled());
     agg.close();
 }
@@ -93,7 +99,7 @@ TEST(killedBeforeTripStaysKilledAfterRecovery) {
 
     // Bring gross back under the resume threshold.
     g0.onFill(0, Side::SELL, 80);   // position 20 * 100 = 2000 < 2500 resume
-    EXPECT_TRUE(waitFor([&] { return !agg.isTripped(); }));
+    EXPECT_TRUE(agg.manualReset());
     // The aggregator's own kill is lifted...
     EXPECT_TRUE(!g0.isKilled());
     // ...but g1's PRE-EXISTING kill (ops hold) must survive recovery.

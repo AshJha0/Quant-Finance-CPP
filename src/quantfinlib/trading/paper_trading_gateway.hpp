@@ -13,11 +13,12 @@
 // acquisition -- safe to read from a dashboard thread while another thread
 // trades.
 //
-// Deviation from the Java source: PreTradeLimitChecker (an optional
-// pre-trade limit gate) has no C++ port yet and is out of this phase's
-// scope, so passesRiskGate() here always approves -- the same behavior as
-// Java's `null` limitChecker default (the common case, and the one every
-// constructor overload here uses).
+// Order validation always runs: quantity must be positive and prices finite
+// and positive, otherwise the order is REJECTED and logged. Attach an
+// HftRiskGate with attachRiskGate to put the live gate in front of the paper
+// venue: reservations, limits, collar and kill behave as on the fast lane,
+// quotes refresh its reference, and a symbol with no id mapping is rejected.
+// With no gate attached, validation is the only pre-trade check.
 #pragma once
 
 #include <cstdint>
@@ -28,6 +29,7 @@
 #include <vector>
 
 #include "quantfinlib/orderbook/side.hpp"
+#include "quantfinlib/trading/hft_risk_gate.hpp"
 
 namespace quantfinlib {
 
@@ -58,11 +60,21 @@ public:
     PaperTradingGateway(const PaperTradingGateway&) = delete;
     PaperTradingGateway& operator=(const PaperTradingGateway&) = delete;
 
+    /**
+     * Puts a gate in front of every order. Call before the first order.
+     * symbolIds maps this gateway's symbol names to the gate's dense ids. The
+     * gate must outlive this gateway.
+     */
+    void attachRiskGate(HftRiskGate& gate, std::unordered_map<std::string, int> symbolIds);
+
     // ------------------------------------------------------------------
     // Market data in
     // ------------------------------------------------------------------
 
-    /** Updates the top of book and fills any resting limit orders that now cross. */
+    /**
+     * Updates the top of book and fills any resting limit orders that now
+     * cross. A quote with an unusable or crossed price is logged and ignored.
+     */
     void onQuote(const std::string& symbol, double bid, double ask);
 
     // ------------------------------------------------------------------
@@ -138,6 +150,8 @@ private:
     std::unordered_map<std::string, Quote> quotes_;
     std::unordered_map<std::int64_t, WorkingOrder> orders_;
     std::vector<std::int64_t> restingIds_;
+    HftRiskGate* riskGate_ = nullptr;
+    std::unordered_map<std::string, int> gateSymbolIds_;
     std::unordered_map<std::string, Position> positions_;
     std::vector<ExecutionListener> listeners_;
     std::vector<std::string> rejectionLog_;

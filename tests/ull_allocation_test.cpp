@@ -17,6 +17,8 @@
 
 #include "quantfinlib/backtest/validation/splittable_random.hpp"
 #include "quantfinlib/orderbook/hft_order_book.hpp"
+#include "quantfinlib/trading/hft_order_gateway.hpp"
+#include "quantfinlib/trading/hft_quoter.hpp"
 #include "quantfinlib/trading/hft_risk_gate.hpp"
 #include "quantfinlib/trading/order_ring_buffer.hpp"
 #include "quantfinlib/util/latency_recorder.hpp"
@@ -120,7 +122,7 @@ TEST(oneMillionSteadyStateOpsAllocateNothing) {
     book.tradeSink(&blackholeSink, nullptr);
     HftRiskGate gate(4);
     gate.maxOrderQuantity(1000).maxOrderNotional(1e9).maxPositionQuantity(
-            std::numeric_limits<std::int64_t>::max());
+            std::numeric_limits<std::int64_t>::max()).disableReferenceCheck();
     OrderRingBuffer ring(1 << 10);
     LatencyRecorder rec;
     SplittableRandom rnd(42);
@@ -148,6 +150,53 @@ TEST(oneMillionSteadyStateOpsAllocateNothing) {
     std::vector<int>* v = new std::vector<int>(64);
     delete v;
     EXPECT_TRUE(g_allocations.load(std::memory_order_relaxed) > probe);
+}
+
+TEST(orderLifecycleAllocatesNothing) {
+    // Submit, deliver, ack, amend, part-fill, cancel, plus a two-sided quote,
+    // on one thread through pollOnce so every step is on the counted path.
+    using quantfinlib::HftOrderGateway;
+    using quantfinlib::HftQuoter;
+    using quantfinlib::VenueMessage;
+    HftRiskGate gate(4);
+    gate.maxOrderQuantity(1000).maxOrderNotional(1e9).maxPositionQuantity(1000000000)
+        .priceCollarPct(0.5);
+    gate.setReferencePrice(0, 100.0);
+    gate.setReferencePrice(1, 100.0);
+    HftOrderGateway gw(1 << 10, gate, false);
+    static int ackCount;
+    ackCount = 0;
+    gw.addVenueListener([&gw](const VenueMessage& m) {
+        switch (m.type) {
+            case VenueMessage::Type::NEW: gw.onOrderAck(m.clOrdId); break;
+            case VenueMessage::Type::REPLACE: gw.onReplaceAck(m.clOrdId); break;
+            case VenueMessage::Type::CANCEL: gw.onCancelAck(m.clOrdId); break;
+        }
+        ackCount++;
+    });
+    HftQuoter quoter(gw, 4, HftQuoter::Config::of(10, 0.05));
+    auto cycle = [&](int i) {
+        std::int64_t id = gw.submit(1, Side::BUY, 100, 100.0, i);
+        gw.pollOnce();
+        gw.replace(id, 80, 100.5, i);
+        gw.pollOnce();
+        gw.onFill(id, 1, Side::BUY, 10);
+        gw.cancel(id, i);
+        gw.pollOnce();
+        gate.onFill(1, Side::SELL, 10);
+        quoter.onTick(0, 100.0 + (i % 5) * 0.01, 1, i);
+        gw.pollOnce();
+    };
+    for (int i = 0; i < 1000; i++) {
+        cycle(i);
+    }
+    long long before = g_allocations.load(std::memory_order_relaxed);
+    for (int i = 0; i < 200000; i++) {
+        cycle(i);
+    }
+    long long after = g_allocations.load(std::memory_order_relaxed);
+    EXPECT_TRUE(after == before);
+    EXPECT_TRUE(ackCount > 200000);
 }
 
 QTEST_MAIN()

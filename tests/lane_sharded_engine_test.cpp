@@ -17,7 +17,12 @@ using quantfinlib::HftRiskGate;
 using quantfinlib::ShardedTradingEngine;
 
 namespace {
-auto gateFactory = [](int) { return std::make_unique<HftRiskGate>(8); };
+auto gateFactory = [](int) {
+    auto gate = std::make_unique<HftRiskGate>(8);
+    gate->maxOrderQuantity(100).maxOrderNotional(1e9).maxPositionQuantity(1000)
+        .disableReferenceCheck();
+    return gate;
+};
 }
 
 TEST(singleShardSymbolRoutesToThatShardOnly) {
