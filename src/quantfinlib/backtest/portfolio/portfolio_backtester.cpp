@@ -42,21 +42,20 @@ Result run(PortfolioStrategy& strategy, const std::map<std::string, BarSeries>& 
         || !(config.borrowRateAnnual >= 0) || !(config.financingRateAnnual >= 0)) {
         throw std::invalid_argument("invalid portfolio config");
     }
-    std::map<std::string, const Delisting*> delistings;
-    for (const Delisting& d : config.delistings) {
-        if (data.find(d.symbol) == data.end() || d.barIndex < 1 || d.barIndex >= n
-            || !std::isfinite(d.delistingReturn) || d.delistingReturn < -1) {
-            throw std::invalid_argument("invalid delisting for " + d.symbol);
-        }
-        delistings[d.symbol] = &d;
+    std::vector<std::string> symbols;
+    std::map<std::string, std::size_t> symbolIndex;
+    for (const auto& e : data) {
+        symbolIndex[e.first] = symbols.size();
+        symbols.push_back(e.first);
     }
+    const std::vector<corporate_actions::TerminalAction> actions = corporate_actions::schedule(
+            symbols, data.begin()->second.timestamps(), config.universe, config.delistings, config.mergers);
     std::map<std::string, bool> volumeKnown;
     for (const auto& e : data) {
         volumeKnown[e.first] = volume_cap::hasVolumeData(e.second);
     }
-    auto isDelisted = [&](const std::string& symbol, int i) {
-        auto d = delistings.find(symbol);
-        return d != delistings.end() && i >= d->second->barIndex;
+    auto isGone = [&](const std::string& symbol, int i) {
+        return actions[symbolIndex.at(symbol)].goneBy(i);
     };
     strategy.init(data);
 
@@ -65,6 +64,7 @@ Result run(PortfolioStrategy& strategy, const std::map<std::string, BarSeries>& 
     std::map<std::string, double> positions;  // signed quantities
     std::vector<double> equity(static_cast<std::size_t>(n), 0.0);
     double totalCosts = 0, totalTurnover = 0, totalBorrow = 0, totalFinancing = 0;
+    int lifecycleEvents = 0;
 
     // Moves positions toward `weights` at bar i's open or close. Trailing
     // cost models read the last bar finished before the fill.
@@ -73,7 +73,7 @@ Result run(PortfolioStrategy& strategy, const std::map<std::string, BarSeries>& 
         int costIndex = atOpen ? i - 1 : i;
         for (const auto& e : data) {
             const std::string& symbol = e.first;
-            if (isDelisted(symbol, i)) {
+            if (isGone(symbol, i)) {
                 continue;
             }
             auto w = weights.find(symbol);
@@ -104,13 +104,25 @@ Result run(PortfolioStrategy& strategy, const std::map<std::string, BarSeries>& 
     bool pending = false;
     std::map<std::string, double> pendingWeights;
     for (int i = 0; i < n; i++) {
-        // 1. Instruments that stopped trading pay out at the delisting return.
-        for (const auto& d : delistings) {
-            auto pos = positions.find(d.first);
-            if (d.second->barIndex == i && pos != positions.end()) {
-                cash += pos->second * data.at(d.first).close(i - 1)
-                        * (1 + d.second->delistingReturn);
-                positions.erase(pos);
+        // 1. Instruments that stopped trading pay out or convert. No deal
+        //    term is read before its effective bar.
+        for (std::size_t k = 0; k < symbols.size(); k++) {
+            const corporate_actions::TerminalAction& action = actions[k];
+            auto pos = positions.find(symbols[k]);
+            if (action.bar != i || pos == positions.end()) {
+                continue;
+            }
+            double held = pos->second;
+            positions.erase(pos);
+            lifecycleEvents++;
+            if (!action.merger) {
+                cash += held * data.at(symbols[k]).close(i - 1) * (1 + action.delistingReturn);
+                continue;
+            }
+            cash += held * action.cashPerShare;
+            if (action.acquirerSharesPerShare > 0) {
+                positions[symbols[static_cast<std::size_t>(action.acquirerIndex)]] +=
+                        held * action.acquirerSharesPerShare;
             }
         }
         // 2. Weights decided on the previous close reach the market.
@@ -154,7 +166,7 @@ Result run(PortfolioStrategy& strategy, const std::map<std::string, BarSeries>& 
     PerformanceMetrics metrics =
             performance_analytics::compute(equity, {}, config.periodsPerYear);
     return Result{std::move(equity), metrics, totalCosts, totalTurnover,
-                  std::move(finalPositions), totalBorrow, totalFinancing};
+                  std::move(finalPositions), totalBorrow, totalFinancing, lifecycleEvents};
 }
 
 }  // namespace portfolio_backtester

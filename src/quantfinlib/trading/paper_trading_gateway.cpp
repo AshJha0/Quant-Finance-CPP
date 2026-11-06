@@ -1,7 +1,6 @@
 #include "quantfinlib/trading/paper_trading_gateway.hpp"
 
 #include <algorithm>
-#include <chrono>
 #include <cmath>
 #include <stdexcept>
 
@@ -13,107 +12,160 @@ bool usablePrice(double p) { return std::isfinite(p) && p > 0; }
 
 double sgn(double v) { return v > 0 ? 1.0 : (v < 0 ? -1.0 : 0.0); }
 
-std::int64_t nowNanos() {
-    return std::chrono::duration_cast<std::chrono::nanoseconds>(
-                   std::chrono::steady_clock::now().time_since_epoch())
-            .count();
+/** FNV-1a: a fixed per-symbol stream, independent of the standard library's hash. */
+std::uint64_t mixSeed(std::uint64_t seed, const std::string& symbol) {
+    std::uint64_t h = 1469598103934665603ULL ^ seed;
+    for (unsigned char c : symbol) {
+        h = (h ^ c) * 1099511628211ULL;
+    }
+    return h;
 }
 
 }  // namespace
 
-void PaperTradingGateway::attachRiskGate(HftRiskGate& gate,
-                                         std::unordered_map<std::string, int> symbolIds) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    riskGate_ = &gate;
-    gateSymbolIds_ = std::move(symbolIds);
+PaperTradingGateway::PaperTradingGateway(double initialCash, double commissionRate, HftRiskGate& gate,
+                                         std::unordered_map<std::string, int> symbolIds,
+                                         const FillConfig& fills)
+        : commissionRate_(commissionRate),
+          fillConfig_(fills),
+          riskGate_(&gate),
+          gateSymbolIds_(std::move(symbolIds)),
+          cash_(initialCash) {}
+
+PaperTradingGateway::Venue& PaperTradingGateway::venue(const std::string& symbol) {
+    auto it = venues_.find(symbol);
+    if (it == venues_.end()) {
+        FillConfig config = fillConfig_;
+        config.seed = mixSeed(fillConfig_.seed, symbol);
+        it = venues_.emplace(symbol, Venue(config)).first;
+        it->second.simulator.advanceTo(clock_);
+    }
+    return it->second;
 }
 
-void PaperTradingGateway::onQuote(const std::string& symbol, double bid, double ask) {
+void PaperTradingGateway::settle() {
+    for (auto& [symbol, v] : venues_) {
+        v.simulator.advanceTo(clock_);
+        for (const auto& report : v.simulator.drainReports(clock_)) {
+            applyReport(v, report);
+        }
+    }
+}
+
+void PaperTradingGateway::applyReport(Venue& venue, const QueueFillSimulator::Report& report) {
+    std::int64_t id = venue.orderIds.at(report.orderId);
+    WorkingOrder& order = orders_.at(id);
+    if (report.type == QueueFillSimulator::ReportType::CANCELLED) {
+        order.status = OrderStatus::CANCELED;
+        if (riskGate_ != nullptr) {
+            riskGate_->releaseOpen(gateSymbolIds_.at(order.symbol), order.side, report.quantity);
+        }
+        venue.orderIds.erase(report.orderId);
+        return;
+    }
+    applyFill(order.symbol, order.side, report.price, report.quantity);
+    if (riskGate_ != nullptr) {
+        riskGate_->onOrderFill(gateSymbolIds_.at(order.symbol), order.side, report.quantity, report.quantity);
+    }
+    order.filled += report.quantity;
+    bool done = order.filled == order.quantity;
+    order.status = done ? OrderStatus::FILLED : OrderStatus::PARTIALLY_FILLED;
+    if (done) {
+        venue.orderIds.erase(report.orderId);
+    }
+    for (const auto& l : listeners_) {
+        l(order.id, order.symbol, order.side, report.price, report.quantity, report.exchangeNanos);
+    }
+}
+
+void PaperTradingGateway::onQuote(const std::string& symbol, std::int64_t nanos, double bid,
+                                  std::int64_t bidSize, double ask, std::int64_t askSize) {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!usablePrice(bid) || !usablePrice(ask) || bid > ask) {
+    if (!usablePrice(bid) || !usablePrice(ask) || bid > ask || bidSize < 0 || askSize < 0 || nanos < clock_) {
         logRejection("bad quote ignored for " + symbol);
         return;
     }
-    quotes_[symbol] = Quote{bid, ask};
+    clock_ = nanos;
+    venue(symbol).simulator.onBook(nanos, bid, bidSize, ask, askSize);
     if (riskGate_ != nullptr) {
         auto sit = gateSymbolIds_.find(symbol);
         if (sit != gateSymbolIds_.end()) {
             riskGate_->setReferencePrice(sit->second, (bid + ask) / 2);
         }
     }
-    std::vector<std::int64_t> remaining;
-    remaining.reserve(restingIds_.size());
-    for (std::int64_t id : restingIds_) {
-        WorkingOrder& order = orders_.at(id);
-        if (order.symbol != symbol) {
-            remaining.push_back(id);
-            continue;
-        }
-        if (order.side == Side::BUY && ask <= order.limitPrice) {
-            fill(order, std::min(order.limitPrice, ask));
-            continue;
-        }
-        if (order.side == Side::SELL && bid >= order.limitPrice) {
-            fill(order, std::max(order.limitPrice, bid));
-            continue;
-        }
-        remaining.push_back(id);
+    settle();
+}
+
+void PaperTradingGateway::onTrade(const std::string& symbol, std::int64_t nanos, double price,
+                                  std::int64_t quantity) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!usablePrice(price) || quantity <= 0 || nanos < clock_) {
+        logRejection("bad trade ignored for " + symbol);
+        return;
     }
-    restingIds_ = std::move(remaining);
+    clock_ = nanos;
+    venue(symbol).simulator.onTrade(nanos, price, quantity);
+    settle();
+}
+
+PaperTradingGateway::WorkingOrder& PaperTradingGateway::newOrder(const std::string& symbol, Side side,
+                                                                 std::int64_t quantity) {
+    std::int64_t id = nextId_++;
+    return orders_.emplace(id, WorkingOrder{id, symbol, side, quantity, 0, OrderStatus::NEW, 0, false})
+            .first->second;
 }
 
 std::int64_t PaperTradingGateway::submitLimit(const std::string& symbol, Side side,
                                               std::int64_t quantity, double price) {
     std::lock_guard<std::mutex> lock(mutex_);
-    std::int64_t id = nextId_++;
-    orders_.emplace(id, WorkingOrder{id, symbol, side, price, quantity, OrderStatus::NEW});
-    WorkingOrder& stored = orders_.at(id);
+    WorkingOrder& stored = newOrder(symbol, side, quantity);
+    std::int64_t id = stored.id;
     if (!passesRiskGate(stored, price)) {
         return id;
     }
-    auto qit = quotes_.find(symbol);
-    if (qit != quotes_.end()
-            && (side == Side::BUY ? qit->second.ask <= price : qit->second.bid >= price)) {
-        fill(stored, side == Side::BUY ? qit->second.ask : qit->second.bid);
-    } else {
-        restingIds_.push_back(id);
-    }
+    Venue& v = venue(symbol);
+    stored.simId = v.simulator.submitLimit(clock_, side, quantity, price);
+    v.orderIds[stored.simId] = id;
+    settle();
     return id;
 }
 
 std::int64_t PaperTradingGateway::submitMarket(const std::string& symbol, Side side,
                                                std::int64_t quantity) {
     std::lock_guard<std::mutex> lock(mutex_);
-    std::int64_t id = nextId_++;
-    orders_.emplace(id, WorkingOrder{id, symbol, side, std::nan(""), quantity, OrderStatus::NEW});
-    WorkingOrder& stored = orders_.at(id);
-    auto qit = quotes_.find(symbol);
-    if (qit == quotes_.end()) {
+    WorkingOrder& stored = newOrder(symbol, side, quantity);
+    std::int64_t id = stored.id;
+    Venue& v = venue(symbol);
+    // The strategy only knows the book its feed has delivered.
+    auto seen = v.simulator.visibleBook(clock_);
+    if (quantity > 0 && !seen) {
         stored.status = OrderStatus::REJECTED;
         logRejection("order " + std::to_string(id) + ": NO_QUOTE for " + symbol);
         return id;
     }
-    double touch = side == Side::BUY ? qit->second.ask : qit->second.bid;
-    if (!passesRiskGate(stored, touch)) {
+    double touch = !seen ? 0 : (side == Side::BUY ? seen->ask : seen->bid);
+    if (!passesRiskGate(stored, quantity > 0 ? touch : 1.0)) {
         return id;
     }
-    fill(stored, touch);
+    stored.simId = v.simulator.submitMarket(clock_, side, quantity);
+    v.orderIds[stored.simId] = id;
+    settle();
     return id;
 }
 
 bool PaperTradingGateway::cancel(std::int64_t orderId) {
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = orders_.find(orderId);
-    if (it == orders_.end() || it->second.status != OrderStatus::NEW) {
+    if (it == orders_.end() || it->second.cancelSent
+        || (it->second.status != OrderStatus::NEW && it->second.status != OrderStatus::PARTIALLY_FILLED)) {
         return false;
     }
-    it->second.status = OrderStatus::CANCELED;
-    if (riskGate_ != nullptr) {
-        riskGate_->releaseOpen(gateSymbolIds_.at(it->second.symbol), it->second.side,
-                               it->second.quantity);
+    WorkingOrder& order = it->second;
+    if (!venues_.at(order.symbol).simulator.cancel(clock_, order.simId)) {
+        return false;  // finished at the venue, the report is on its way
     }
-    restingIds_.erase(std::remove(restingIds_.begin(), restingIds_.end(), orderId),
-                       restingIds_.end());
+    order.cancelSent = true;
+    settle();
     return true;
 }
 
@@ -124,6 +176,15 @@ OrderStatus PaperTradingGateway::status(std::int64_t orderId) const {
         throw std::invalid_argument("unknown order " + std::to_string(orderId));
     }
     return it->second.status;
+}
+
+std::int64_t PaperTradingGateway::filledQuantity(std::int64_t orderId) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = orders_.find(orderId);
+    if (it == orders_.end()) {
+        throw std::invalid_argument("unknown order " + std::to_string(orderId));
+    }
+    return it->second.filled;
 }
 
 void PaperTradingGateway::addExecutionListener(ExecutionListener listener) {
@@ -155,9 +216,10 @@ double PaperTradingGateway::equity() const {
 double PaperTradingGateway::equityLocked() const {
     double value = cash_;
     for (const auto& [symbol, p] : positions_) {
-        auto qit = quotes_.find(symbol);
-        if (qit != quotes_.end()) {
-            value += p.quantity * qit->second.mid();
+        auto vit = venues_.find(symbol);
+        auto seen = vit == venues_.end() ? std::nullopt : vit->second.simulator.visibleBook(clock_);
+        if (seen) {
+            value += p.quantity * seen->mid();
         }
     }
     return value;
@@ -189,6 +251,12 @@ PaperTradingGateway::AccountSnapshot PaperTradingGateway::snapshot() const {
                            positionsSnapshotLocked()};
 }
 
+QueueFillSimulator::AdverseSelection PaperTradingGateway::adverseSelection(const std::string& symbol) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = venues_.find(symbol);
+    return it == venues_.end() ? QueueFillSimulator::AdverseSelection{} : it->second.simulator.adverseSelection();
+}
+
 bool PaperTradingGateway::passesRiskGate(WorkingOrder& order, double referencePrice) {
     std::string reason;
     if (order.quantity <= 0) {
@@ -218,20 +286,6 @@ void PaperTradingGateway::logRejection(const std::string& entry) {
     rejectionCount_++;
     if (static_cast<int>(rejectionLog_.size()) < REJECTION_LOG_CAP) {
         rejectionLog_.push_back(entry);
-    }
-}
-
-void PaperTradingGateway::fill(WorkingOrder& order, double price) {
-    std::int64_t qty = order.quantity;
-    applyFill(order.symbol, order.side, price, qty);
-    if (riskGate_ != nullptr) {
-        riskGate_->onOrderFill(gateSymbolIds_.at(order.symbol), order.side, qty, qty);
-    }
-    order.quantity = 0;
-    order.status = OrderStatus::FILLED;
-    std::int64_t ts = nowNanos();
-    for (const auto& l : listeners_) {
-        l(order.id, order.symbol, order.side, price, qty, ts);
     }
 }
 

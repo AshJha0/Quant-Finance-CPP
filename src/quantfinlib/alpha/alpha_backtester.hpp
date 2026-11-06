@@ -14,9 +14,11 @@
 //  - Each name's trade is capped at maxParticipationRate of the execution
 //    bar's volume; an unreached target is left for the next rebalance.
 //  - Shorts pay borrow, net long above 1 pays financing.
-//  - Delisted names pay their delisting return and leave the book. Events
-//    come from Config::delistings and the context's universe; mergers are
-//    not modelled.
+//  - Delisted names pay their delisting return and leave the book; merged
+//    names convert at the deal terms on the effective bar, the stock leg
+//    becoming acquirer weight and the cash leg cash. Events come from
+//    Config::delistings, Config::mergers and the context's universe, resolved
+//    by backtest/corporate_actions.hpp as in the portfolio engine.
 #pragma once
 
 #include <functional>
@@ -25,6 +27,7 @@
 #include "quantfinlib/alpha/alpha_context.hpp"
 #include "quantfinlib/alpha/alpha_factor.hpp"
 #include "quantfinlib/backtest/backtest_config.hpp"
+#include "quantfinlib/backtest/corporate_actions.hpp"
 #include "quantfinlib/backtest/delisting.hpp"
 #include "quantfinlib/backtest/performance_metrics.hpp"
 
@@ -49,6 +52,7 @@ using WeightBuilder =
  * @param borrowBpsAnnual     assumed borrow on short weight (general collateral)
  * @param financingBpsAnnual  assumed financing on net long above 1
  * @param delistings          terminal events, added to the universe's
+ * @param mergers             deals, added to the universe's
  */
 struct Config {
     int startIndex = 0;
@@ -64,6 +68,7 @@ struct Config {
     double borrowBpsAnnual = 50;
     double financingBpsAnnual = 500;
     std::vector<Delisting> delistings;
+    std::vector<Merger> mergers;
 
     /** Close-of-signal fills, no volume cap, no carry: the textbook idealisation. */
     Config withIdealisedExecution() const {

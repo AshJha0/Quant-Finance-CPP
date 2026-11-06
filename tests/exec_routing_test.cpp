@@ -3,6 +3,9 @@
 // benchmark helpers. Pins are ported 1:1 from the Java reference tests
 // (HftSorTest, ExecutionTest, AdaptiveSorTest) so the routing arithmetic
 // can never silently drift.
+// Pins the deprecated research overloads as well as the guarded ones.
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+
 #include <cmath>
 #include <cstdint>
 #include <limits>
