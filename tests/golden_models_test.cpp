@@ -237,6 +237,10 @@ TEST(golden_multiCurveAgainstQuantLib) {
     EXPECT_THROWS(multi_curve_bootstrap::bootstrapProjection(val, ois, interp, d));
     EXPECT_THROWS(multi_curve_bootstrap::bootstrapProjection(val.plusDays(1), proj, interp, d));
     EXPECT_THROWS(Deposit(val, val, 0.01, DayCount::ACT_360));
+    // A quote no curve can reach (1 + r*tau < 0) fails rather than returning a curve.
+    std::vector<CurveInstrumentPtr> impossible = {
+            std::make_shared<Deposit>(val, val.plusMonths(6), -10.0, DayCount::ACT_360)};
+    EXPECT_THROWS(multi_curve_bootstrap::bootstrap(val, impossible, interp));
 }
 
 TEST(futuresConvexityByHand) {
