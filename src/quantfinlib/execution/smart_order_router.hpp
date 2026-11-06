@@ -4,9 +4,15 @@
 // price at their midpoint; with preferDark they are swept first
 // regardless of ranking (to minimize information leakage), otherwise
 // every venue competes purely on all-in price.
+//
+// DEVIATION FROM JAVA: a non-positive price is never routable; venue latency
+// costs latencyBpsPerMs in the ranking; lit legs execute in displayed-price
+// order, so a low fee cannot route through a better displayed quote (Reg NMS
+// Rule 611 in spirit); fees then rank venues showing the same price.
 #pragma once
 
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -31,6 +37,30 @@ struct RoutingPlan {
     double expectedAvgAllInPrice;
 };
 
+/** Default ranking charge for latency; the same figure as AdaptiveSor's default. */
+constexpr double DEFAULT_LATENCY_BPS_PER_MS = 1.0;
+
+/** Whether nothing newer than maxQuoteAgeNanos backs this quote. An unset or future stamp counts as stale. */
+bool isStale(const VenueQuote& quote, std::int64_t nowNanos, std::int64_t maxQuoteAgeNanos);
+
+/** True when the price is a real price (finite, > 0) inside limitPrice. */
+bool isDealable(Side side, double price, double limitPrice);
+
+/** Throws unless limitPrice is a number and maxQuoteAgeNanos >= 0. */
+void requireRouteArguments(double limitPrice, std::int64_t maxQuoteAgeNanos);
+
+/** The limit that means "pure market" for this side. */
+double marketLimit(Side side);
+
+/** Everything the router can be told beyond the order itself. */
+struct RouteOptions {
+    double limitPrice;                 // use marketLimit(side) for none
+    std::int64_t nowNanos = 0;
+    std::int64_t maxQuoteAgeNanos = std::numeric_limits<std::int64_t>::max();  // max disables
+    double latencyBpsPerMs = DEFAULT_LATENCY_BPS_PER_MS;
+    bool allowTradeThrough = false;    // true restores pure all-in ordering of lit venues
+};
+
 RoutingPlan route(Side side, std::int64_t quantity, const std::vector<VenueQuote>& venues, bool preferDark);
 
 /**
@@ -52,11 +82,15 @@ RoutingPlan route(Side side, std::int64_t quantity, const std::vector<VenueQuote
  *
  * @param nowNanos         current time, same clock as VenueQuote::lastUpdateNanos
  * @param maxQuoteAgeNanos a venue is excluded when
- *                         nowNanos - quote.lastUpdateNanos > maxQuoteAgeNanos;
+ *                         nowNanos - quote.lastUpdateNanos > maxQuoteAgeNanos,
+ *                         or its stamp is unset or in the future;
  *                         pass INT64_MAX to disable the staleness check
  */
 RoutingPlan route(Side side, std::int64_t quantity, const std::vector<VenueQuote>& venues, bool preferDark,
                   double limitPrice, std::int64_t nowNanos, std::int64_t maxQuoteAgeNanos);
+
+RoutingPlan route(Side side, std::int64_t quantity, const std::vector<VenueQuote>& venues, bool preferDark,
+                  const RouteOptions& options);
 
 }  // namespace smart_order_router
 }  // namespace quantfinlib

@@ -2,15 +2,18 @@
 // (classic overload): multi-asset, long/short portfolio backtester —
 // rebalances positions (possibly fractional and negative) toward the
 // strategy's target weights at a configurable cadence, charging
-// commission on traded notional. This is where the optimization stack
+// commission on traded notional. Weights decided on bar t's close trade at
+// bar t+1's open unless fillTiming says otherwise, each trade capped at
+// maxParticipationRate of the bar's volume. Shorts pay borrow and a cash
+// debit pays financing, accrued per bar. Delistings close at the recorded
+// delisting return. This is where the optimization stack
 // meets the backtester — feed optimizer weights, vol-target overlays,
 // or momentum rankings straight in.
 //
 // PORT SCOPE: the Java survivorship-aware overload (PointInTimeUniverse
-// membership, delistings/mergers/index drops, cash dividends) is NOT
-// ported — its dependencies (com.quantfinlib.data.PointInTimeUniverse,
-// CorporateActions) have no C++ port yet. This is the classic run:
-// every supplied symbol is tradeable on every bar. The Result fields
+// membership, mergers/index drops, cash dividends) is NOT ported; only
+// Config::delistings is. Otherwise every supplied symbol is tradeable on
+// every bar. The Result fields
 // populated only by that overload (dividendCashCredited,
 // lifecycleEventsApplied) are omitted. Gates map to
 // std::invalid_argument.
@@ -20,6 +23,8 @@
 #include <string>
 #include <vector>
 
+#include "quantfinlib/backtest/backtest_config.hpp"
+#include "quantfinlib/backtest/delisting.hpp"
 #include "quantfinlib/backtest/performance_metrics.hpp"
 #include "quantfinlib/backtest/portfolio/portfolio_strategy.hpp"
 #include "quantfinlib/backtest/trade_cost_model.hpp"
@@ -36,12 +41,33 @@ namespace portfolio_backtester {
  */
 struct Config {
     double initialCapital = 0;
-    double commissionRate = 0;
+    double commissionRate = 0.001;
     int rebalanceEveryBars = 1;
     int periodsPerYear = 252;
     TradeCostModel costModel;  // empty = flat commissionRate
+    FillTiming fillTiming = FillTiming::NEXT_BAR_OPEN;
+    double maxParticipationRate = 0.10;  // of bar volume; 0 disables
+    // Annual rates, accrued per bar. Assumed levels, not market data: 50 bps
+    // is general-collateral borrow; hard-to-borrow names cost far more.
+    double borrowRateAnnual = 0.005;     // on short market value
+    double financingRateAnnual = 0.05;   // on a negative cash balance
+    std::vector<Delisting> delistings;
 
-    static Config defaults() { return Config{1000000, 0.001, 1, 252, nullptr}; }
+    static Config defaults() {
+        Config c;
+        c.initialCapital = 1000000;
+        return c;
+    }
+
+    /** Close-of-signal fills, no volume cap, no carry: the textbook idealisation. */
+    Config withIdealisedExecution() const {
+        Config c = *this;
+        c.fillTiming = FillTiming::SAME_BAR_CLOSE;
+        c.maxParticipationRate = 0;
+        c.borrowRateAnnual = 0;
+        c.financingRateAnnual = 0;
+        return c;
+    }
 
     Config withRebalanceEvery(int bars) const {
         Config c = *this;
@@ -69,6 +95,8 @@ struct Result {
     double totalCosts = 0;
     double totalTurnoverNotional = 0;
     std::map<std::string, double> finalPositions;
+    double totalBorrowCost = 0;
+    double totalFinancingCost = 0;
 };
 
 /** Classic run: every supplied symbol is tradeable on every bar. */

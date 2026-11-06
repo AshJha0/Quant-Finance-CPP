@@ -42,7 +42,7 @@ std::map<std::string, BarSeries> twoSymbols() {
 
 TEST(rebalanceTowardTargetWeightsZeroCommission) {
     FixedWeights strategy({{"A", 0.5}, {"B", 0.5}});
-    pbt::Config config = pbt::Config{1000000, 0.0, 1, 252, nullptr};
+    pbt::Config config = pbt::Config{1000000, 0.0, 1, 252, nullptr}.withIdealisedExecution();
     pbt::Result result = pbt::run(strategy, twoSymbols(), config);
 
     // Bar 0: 50000 shares each at 10. Bar 1: A=11, B=9 -> PV still 1M;
@@ -58,7 +58,7 @@ TEST(rebalanceTowardTargetWeightsZeroCommission) {
 
 TEST(commissionChargedOnTradedNotional) {
     FixedWeights strategy({{"A", 0.5}, {"B", 0.5}});
-    pbt::Config config = pbt::Config{1000000, 0.001, 1, 252, nullptr};
+    pbt::Config config = pbt::Config{1000000, 0.001, 1, 252, nullptr}.withIdealisedExecution();
     pbt::Result result = pbt::run(strategy, twoSymbols(), config);
     // Bar 0 trades 1M of notional -> 1000 of fees.
     EXPECT_NEAR(result.equityCurve[0], 999000.0, 1e-6);
@@ -69,7 +69,7 @@ TEST(costModelSupersedesFlatCommission) {
     // flat(20 bps) = 0.002 vs commissionRate 0.001: fees double, proving
     // the TradeCostModel seam supersedes the legacy flat rate.
     FixedWeights strategy({{"A", 0.5}, {"B", 0.5}});
-    pbt::Config config = pbt::Config{1000000, 0.001, 1, 252, nullptr}.withCostModel(
+    pbt::Config config = pbt::Config{1000000, 0.001, 1, 252, nullptr}.withIdealisedExecution().withCostModel(
             trade_cost_model::flat(20));
     pbt::Result result = pbt::run(strategy, twoSymbols(), config);
     EXPECT_NEAR(result.equityCurve[0], 998000.0, 1e-6);
@@ -81,7 +81,7 @@ TEST(shortWeightsAndLeverageAreAllowed) {
     // = 1.1M... wait: long 50000 A (500k), short 50000 B (-500k), cash 1M.
     // Bar 1: 1M + 550000 - 450000 = 1.1M.
     FixedWeights strategy({{"A", 0.5}, {"B", -0.5}});
-    pbt::Config config = pbt::Config{1000000, 0.0, 1, 252, nullptr};
+    pbt::Config config = pbt::Config{1000000, 0.0, 1, 252, nullptr}.withIdealisedExecution();
     pbt::Result result = pbt::run(strategy, twoSymbols(), config);
     EXPECT_NEAR(result.equityCurve[0], 1000000.0, 1e-6);
     EXPECT_NEAR(result.equityCurve[1], 1100000.0, 1e-6);
@@ -91,7 +91,7 @@ TEST(rebalanceCadenceSkipsBars) {
     std::map<std::string, BarSeries> data = {
             {"A", BarSeries::of("A", {10, 12, 15, 20})}};
     FixedWeights strategy({{"A", 1.0}});
-    pbt::Config config = pbt::Config{1000000, 0.0, 3, 252, nullptr};
+    pbt::Config config = pbt::Config{1000000, 0.0, 3, 252, nullptr}.withIdealisedExecution();
     pbt::Result result = pbt::run(strategy, data, config);
     // Trades on bars 0 and 3 only: bar-0 buy of 100000 shares (1M), then
     // bar-3 the position is already worth PV -> delta 0. Turnover = 1M.
@@ -171,7 +171,7 @@ TEST(momentumBookRunsThroughThePortfolioEngine) {
                                              {"FLAT", BarSeries::of("FLAT", flat)},
                                              {"DOWN", BarSeries::of("DOWN", down)}};
     CrossSectionalMomentum strategy(CrossSectionalMomentum::Config(3, 1, 1, 0.5));
-    pbt::Config config = pbt::Config{1000000, 0.0, 1, 252, nullptr};
+    pbt::Config config = pbt::Config{1000000, 0.0, 1, 252, nullptr}.withIdealisedExecution();
     pbt::Result result = pbt::run(strategy, data, config);
 
     // Long UP, short DOWN from bar 3: both legs profit every bar.

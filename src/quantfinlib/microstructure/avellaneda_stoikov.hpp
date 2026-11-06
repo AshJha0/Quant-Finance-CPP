@@ -6,7 +6,9 @@
 // cost of quoting wide. Units contract: priceVariancePerSecond is the
 // variance of the PRICE per second (not the return), inventory is signed
 // units of the instrument the mid prices. Pure static-shape math, zero
-// allocation.
+// allocation. Fails closed: a NaN, infinite or negative input throws, since
+// quoting the tightest spread on an unreadable variance is the worst answer.
+// Zero variance or a zero horizon are legitimate and leave only the floor.
 #pragma once
 
 namespace quantfinlib {
@@ -19,7 +21,7 @@ public:
      */
     AvellanedaStoikov(double gamma, double kappa);
 
-    /** mid - inventory*gamma*sigma^2*tau; flat inventory or garbage variance returns mid. */
+    /** mid - inventory*gamma*sigma^2*tau; flat inventory or zero variance returns mid. */
     double reservationPrice(double mid, double inventory, double priceVariancePerSecond,
                              double horizonSeconds) const;
 

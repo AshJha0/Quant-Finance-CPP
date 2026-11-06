@@ -89,6 +89,14 @@ public:
     RoutingDecision route(Side side, std::int64_t quantity, const std::vector<VenueQuote>& venues);
 
     /**
+     * As above, with the limit and staleness rules of
+     * smart_order_router::route: a venue through limitPrice, or stale at
+     * nowNanos, gets neither lit legs nor dark probes.
+     */
+    RoutingDecision route(Side side, std::int64_t quantity, const std::vector<VenueQuote>& venues,
+                          double limitPrice, std::int64_t nowNanos, std::int64_t maxQuoteAgeNanos);
+
+    /**
      * Fill probability for a PASSIVE child joining a queue with
      * `qtyAhead` ahead of it -- the queue-position leg of the routing
      * checklist, delegated to QueueModel.

@@ -87,6 +87,12 @@ public:
      */
     void onFill(int handle, std::int64_t qty, double price);
 
+    /** A child order went out; the leg band and the child both count it from now on. */
+    void onSent(int handle, std::int64_t qty);
+
+    /** Working quantity came back unfilled. */
+    void onCancelled(int handle, std::int64_t qty);
+
     /** Signed net filled notional: buys - sells. The leg-balance ledger. */
     double netNotional() const { return buyFilledNotional_ - sellFilledNotional_; }
 

@@ -1,6 +1,9 @@
 #include "quantfinlib/backtest/execution_aware_backtester.hpp"
 
 #include <algorithm>
+#include <cmath>
+
+#include "quantfinlib/backtest/volume_cap.hpp"
 
 namespace quantfinlib {
 
@@ -14,7 +17,16 @@ ExecutionAwareBacktester::ExecutionAwareBacktester(TradingStrategy& strategy,
           model_(model),
           stopLossPct_(strategy.stopLossPct() > 0 ? strategy.stopLossPct() : config.stopLossPct),
           takeProfitPct_(strategy.takeProfitPct() > 0 ? strategy.takeProfitPct()
-                                                      : config.takeProfitPct) {}
+                                                      : config.takeProfitPct),
+          sameBar_(config.fillTiming == FillTiming::SAME_BAR_CLOSE),
+          volumeKnown_(volume_cap::hasVolumeData(series)) {
+    volume_cap::requireRate(config.maxParticipationRate);
+}
+
+std::int64_t ExecutionAwareBacktester::volumeLimited(std::int64_t qty, int i) const {
+    double cap = volume_cap::maxQuantity(series_, i, config_.maxParticipationRate, volumeKnown_);
+    return cap >= static_cast<double>(qty) ? qty : static_cast<std::int64_t>(std::floor(cap));
+}
 
 ExecutionAwareResult ExecutionAwareBacktester::run(TradingStrategy& strategy,
                                                    const BarSeries& series,
@@ -67,7 +79,7 @@ void ExecutionAwareBacktester::workEntry(int i) {
     double ref = model_.referencePrice(series_, i);
     std::int64_t affordable =
             static_cast<std::int64_t>(cash_ / (ref * (1 + model_.worstCaseCostFraction())));
-    std::int64_t request = std::min(pendingEntry_, affordable);
+    std::int64_t request = volumeLimited(std::min(pendingEntry_, affordable), i);
     if (request <= 0) {
         return;
     }
@@ -89,7 +101,11 @@ void ExecutionAwareBacktester::workEntry(int i) {
 
 void ExecutionAwareBacktester::workExit(int i) {
     ParentState& exit = parents_[static_cast<std::size_t>(exit_)];
-    for (const Execution& f : model_.execute(Side::SELL, pendingExit_, series_, i)) {
+    std::int64_t request = volumeLimited(pendingExit_, i);
+    if (request <= 0) {
+        return;
+    }
+    for (const Execution& f : model_.execute(Side::SELL, request, series_, i)) {
         double proceeds = f.notional();
         cash_ += proceeds;
         exitProceeds_ += proceeds;
@@ -104,7 +120,9 @@ void ExecutionAwareBacktester::workExit(int i) {
 }
 
 void ExecutionAwareBacktester::checkRiskExits(int i) {
-    if (position_ <= 0 || pendingExit_ > 0 || firstEntryBar_ < 0 || i <= firstEntryBar_) {
+    // An entry at this bar's open is exposed to the rest of the bar.
+    if (position_ <= 0 || pendingExit_ > 0 || firstEntryBar_ < 0
+        || (sameBar_ && i <= firstEntryBar_)) {
         return;
     }
     double avgEntry = entryCost_ / static_cast<double>(totalEntryQty_);
@@ -116,7 +134,9 @@ void ExecutionAwareBacktester::checkRiskExits(int i) {
     }
     if (reason != nullptr) {
         startExit(i, reason);
-        workExit(i);
+        if (sameBar_) {
+            workExit(i);
+        }
     }
 }
 
@@ -136,13 +156,17 @@ void ExecutionAwareBacktester::onSignal(Signal signal, int i) {
         firstEntryBar_ = -1;
         pendingEntry_ = target;
         model_.onParentOrder(Side::BUY, target, i);
-        workEntry(i);
+        if (sameBar_) {
+            workEntry(i);
+        }
     } else if (signal == Signal::SELL && pendingExit_ == 0
                && (position_ > 0 || pendingEntry_ > 0)) {
         pendingEntry_ = 0;  // cancel unfilled entry remainder
         if (position_ > 0) {
             startExit(i, Trade::REASON_SIGNAL);
-            workExit(i);
+            if (sameBar_) {
+                workExit(i);
+            }
         } else {
             entry_ = -1;  // nothing filled; abandon the parent
         }

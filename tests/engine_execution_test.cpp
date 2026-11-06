@@ -20,7 +20,7 @@ using namespace quantfinlib;
 namespace {
 
 BacktestConfig zeroCost() {
-    return BacktestConfig{100000, 0.0, 0.0, 0.0, 0.0, 252};
+    return BacktestConfig{100000, 0.0, 0.0, 0.0, 0.0, 252}.withSameBarCloseFill().withoutVolumeCap();
 }
 
 /** Scripted signals: BUY at one bar, optional SELL at another. */
@@ -91,7 +91,7 @@ double minRunningCash(const ExecutionAwareResult& result, double initialCapital)
 TEST(instantExecutionFillsAllInAtClose) {
     std::vector<double> closes = {10, 10, 10, 10, 20, 20, 20, 5, 5, 5};
     BarSeries series = BarSeries::of("TEST", closes);
-    BacktestConfig config = BacktestConfig::defaults();
+    BacktestConfig config = BacktestConfig::defaults().withSameBarCloseFill().withoutVolumeCap().withSlippage(0);
     SmaCrossStrategy strategy(2, 3);
     InstantExecution model = InstantExecution::from(config);
     ExecutionAwareResult result =
@@ -144,7 +144,7 @@ TEST(icebergWorksEntryAcrossBarsAndConservesCash) {
     BarSeries series = BarSeries::of("ICE", closes);
     BacktestConfig config = zeroCost().withCommission(0.001);
     Script strategy(0, 8);
-    InstantExecution inner(config.commissionRate, config.slippageRate);
+    InstantExecution inner(config.commissionRate, config.slippageRate, FillTiming::SAME_BAR_CLOSE);
     IcebergExecution model(inner, 200);
     ExecutionAwareResult result =
             ExecutionAwareBacktester::run(strategy, series, config, model);
@@ -175,7 +175,7 @@ TEST(icebergParticipationCapThrottlesFills) {
     BarSeries series = b.build();
     BacktestConfig config = zeroCost();
     Script strategy(0, -1);
-    InstantExecution inner(0, 0);
+    InstantExecution inner(0, 0, FillTiming::SAME_BAR_CLOSE);
     // Display 500 but 10% of 1000 = 100 caps every tranche.
     IcebergExecution model(inner, 500, 0, 0.10, 42);
     ExecutionAwareResult result =
@@ -286,7 +286,7 @@ TEST(sellSignalCancelsUnfilledEntryRemainder) {
     BarSeries series = BarSeries::of("CXL", closes);
     BacktestConfig config = zeroCost();
     Script strategy(0, 2);
-    InstantExecution inner(0, 0);
+    InstantExecution inner(0, 0, FillTiming::SAME_BAR_CLOSE);
     IcebergExecution model(inner, 100);
     ExecutionAwareResult result =
             ExecutionAwareBacktester::run(strategy, series, config, model);
@@ -306,7 +306,7 @@ TEST(riskExitWorkedThroughThePatientModel) {
     BarSeries series = BarSeries::of("STOP", closes);
     BacktestConfig config = zeroCost().withStopLoss(0.25);
     Script strategy(0, -1);
-    InstantExecution inner(0, 0);
+    InstantExecution inner(0, 0, FillTiming::SAME_BAR_CLOSE);
     IcebergExecution model(inner, 1000);
     ExecutionAwareResult result =
             ExecutionAwareBacktester::run(strategy, series, config, model);
@@ -338,7 +338,7 @@ TEST(tcaReportsPerParentOrder) {
     BarSeries series = BarSeries::of("TCA", closes);
     BacktestConfig config = zeroCost().withCommission(0.001);
     Script strategy(0, 8);
-    InstantExecution inner(config.commissionRate, 0);
+    InstantExecution inner(config.commissionRate, 0, FillTiming::SAME_BAR_CLOSE);
     IcebergExecution model(inner, 200);
     ExecutionAwareResult result =
             ExecutionAwareBacktester::run(strategy, series, config, model);

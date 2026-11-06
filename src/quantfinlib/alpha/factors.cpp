@@ -48,12 +48,12 @@ AlphaFactor named(std::string name, int minBars, ScoreFn perSymbol) {
     });
 }
 
-/** Wraps a fundamentals read; NaN for symbols without a snapshot. */
+/** Wraps an as-of fundamentals read; NaN until a record is public. */
 AlphaFactor fundamental(std::string name, std::function<double(const Fundamentals&)> f) {
     return AlphaFactor(std::move(name), [f](const AlphaContext& ctx, int index) {
         std::vector<double> out(static_cast<std::size_t>(ctx.symbolCount()));
         for (int i = 0; i < static_cast<int>(out.size()); i++) {
-            const Fundamentals* fu = ctx.fundamentals(i);
+            const Fundamentals* fu = ctx.fundamentalsAsOf(i, index);
             out[static_cast<std::size_t>(i)] =
                     (fu == nullptr || !ctx.isActive(i, index)) ? kNaN : f(*fu);
         }

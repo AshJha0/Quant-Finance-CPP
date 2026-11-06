@@ -144,7 +144,13 @@ void PortfolioExecutor::applyLegBand(std::vector<std::int64_t>& dueOut) {
             sellDue += notional;
         }
     }
+    // In-flight children may yet fill, so the band counts them as filled.
     double net = buyFilledNotional_ - sellFilledNotional_;
+    for (int i = 0; i < count_; i++) {
+        auto idx = static_cast<std::size_t>(i);
+        double working = static_cast<double>(children_[idx].working()) * lastMid_[idx];
+        net += children_[idx].side() == Side::BUY ? working : -working;
+    }
     double projected = net + buyDue - sellDue;
     if (projected > config_.maxNetNotional && buyDue > 0) {
         double allowed = std::max(0.0, config_.maxNetNotional - net + sellDue);
@@ -177,6 +183,14 @@ void PortfolioExecutor::onFill(int handle, std::int64_t qty, double price) {
             sellFilledNotional_ += notional;
         }
     }
+}
+
+void PortfolioExecutor::onSent(int handle, std::int64_t qty) {
+    children_[static_cast<std::size_t>(handle)].onSent(qty);
+}
+
+void PortfolioExecutor::onCancelled(int handle, std::int64_t qty) {
+    children_[static_cast<std::size_t>(handle)].onCancelled(qty);
 }
 
 bool PortfolioExecutor::done() const {

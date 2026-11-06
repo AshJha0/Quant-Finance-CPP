@@ -68,7 +68,7 @@ bt::Config configOf(int start, double capital) {
     c.capital = capital;
     c.impactWindow = 20;
     c.periodsPerYear = 252;
-    return c;
+    return c.withIdealisedExecution();
 }
 
 }  // namespace

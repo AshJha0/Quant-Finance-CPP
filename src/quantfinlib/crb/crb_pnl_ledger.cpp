@@ -34,6 +34,13 @@ void CrbPnlLedger::onDecision(const InternalizationEngine::Decision& decision,
     onInternalized(std::fabs(decision.internalized), halfSpreadBps, decision.improvementBps);
 }
 
+void CrbPnlLedger::markInventory(double inventoryPnl) {
+    if (!std::isfinite(inventoryPnl)) {
+        throw std::invalid_argument("inventoryPnl must be finite");
+    }
+    inventoryPnl_ = inventoryPnl;
+}
+
 void CrbPnlLedger::onHedge(double notional, double costBps) {
     if (!(costBps >= 0) || costBps == std::numeric_limits<double>::infinity()) {
         throw std::invalid_argument("costBps must be >= 0 and finite");

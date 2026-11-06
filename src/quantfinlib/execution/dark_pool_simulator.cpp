@@ -53,6 +53,7 @@ std::vector<DarkPoolSimulator::Fill> DarkPoolSimulator::submit(Side side, std::i
                     continue;
                 }
                 it->qty -= fill;
+                it->minQty = 0;
                 remaining -= fill;
                 fills.push_back(side == Side::BUY ? Fill{id, it->id, mid_, fill}
                                                   : Fill{it->id, id, mid_, fill});
@@ -65,7 +66,8 @@ std::vector<DarkPoolSimulator::Fill> DarkPoolSimulator::submit(Side side, std::i
         }
     }
     if (remaining > 0) {
-        (side == Side::BUY ? buys_ : sells_).push_back(Resting{id, minExecutionQty, remaining});
+        (side == Side::BUY ? buys_ : sells_).push_back(
+                Resting{id, fills.empty() ? minExecutionQty : 0, remaining});
     }
     return fills;
 }

@@ -13,6 +13,13 @@
 // depth), and fill rate / schedule drift (feed realized fills via
 // onFill).
 //
+// DEVIATION FROM JAVA: child orders in flight count. Report each send with
+// onSent, and dueQuantity excludes working quantity, so a poll between send
+// and fill cannot release the same shares twice. At the end of the horizon
+// (scheduleFraction >= 1) a schedule benchmark asks for everything left,
+// whatever alpha or spread say. A NaN schedule fraction or a NaN or negative
+// depth means "unknown", and an unknown state sends nothing.
+//
 // IllegalArgumentException maps to std::invalid_argument.
 #pragma once
 
@@ -41,7 +48,8 @@ public:
      * neutral value disables that input: spread=0, volatility=0, alpha=0,
      * displayedDepth=+inf (no liquidity cap),
      * expectedVolumeFractionElapsed=schedule fraction (VWAP falls back to
-     * TWAP), impactBps=0. NaN in any field is treated as its neutral value.
+     * TWAP), impactBps=0. NaN in a signal field is treated as its neutral
+     * value. displayedDepth is a safety limit, not a signal: NaN sends nothing.
      *
      * Units contract: volatility is a normalized volatility-REGIME signal
      * ~0 calm to ~1 extreme; alpha is a normalized expected-move signal in
@@ -88,8 +96,20 @@ public:
     /** A market print that was NOT our fill (drives VWAP/POV realized volume). */
     void onMarketVolume(std::int64_t qty);
 
-    /** Our own child fill. */
+    /** Our own child fill; releases the same quantity of working orders. */
     void onFill(std::int64_t qty);
+
+    /** A child order went out. Throws if it would overfill the parent. */
+    void onSent(std::int64_t qty);
+
+    /** Working quantity came back unfilled (cancel, reject, expiry). */
+    void onCancelled(std::int64_t qty);
+
+    /**
+     * Round every due quantity down to whole lots. A remainder below one
+     * lot is released as a final odd lot once nothing else is due.
+     */
+    BenchmarkExecutor& withLotSize(std::int64_t lotSize);
 
     // -------------------------------------------------------------- Decision
 
@@ -98,8 +118,10 @@ public:
 
     /**
      * Shares to send now, given the current market and how far through the
-     * schedule we are. Returns 0 when on/ahead of schedule or done; caps at
-     * the parent remainder and at maxDepthFraction * displayedDepth.
+     * schedule we are, net of quantity already working. Returns 0 when
+     * on/ahead of schedule or done; caps at the unsent parent remainder and
+     * at maxDepthFraction * displayedDepth. Polling does not reserve: call
+     * onSent for what is actually sent.
      *
      * @param scheduleFraction elapsed fraction of the execution horizon in
      *                         [0, 1]; ignored by PARTICIPATION
@@ -111,6 +133,7 @@ public:
 
     std::int64_t executed() const { return executed_; }
     std::int64_t remaining() const { return parentQty_ - executed_; }
+    std::int64_t working() const { return working_; }
     std::int64_t parentQty() const { return parentQty_; }
     std::int64_t marketVolume() const { return marketVolume_; }
     bool done() const { return executed_ >= parentQty_; }
@@ -140,7 +163,9 @@ private:
     double maxDepthFraction_;
 
     std::int64_t executed_ = 0;
+    std::int64_t working_ = 0;
     std::int64_t marketVolume_ = 0;
+    std::int64_t lotSize_ = 1;
 };
 
 }  // namespace quantfinlib

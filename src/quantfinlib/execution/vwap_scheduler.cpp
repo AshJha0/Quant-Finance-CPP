@@ -23,8 +23,7 @@ std::vector<std::int64_t> allocateProportionally(std::int64_t total, const std::
     }
     std::vector<std::int64_t> out(n, 0);
     if (sum == 0) {
-        out[0] = total;
-        return out;
+        throw std::invalid_argument("weights sum to zero: no basis for an allocation");
     }
     std::vector<double> fractions(n, 0.0);
     std::int64_t allocated = 0;
@@ -44,6 +43,22 @@ std::vector<std::int64_t> allocateProportionally(std::int64_t total, const std::
                      [&](std::size_t a, std::size_t b) { return fractions[a] > fractions[b]; });
     for (std::int64_t k = 0; k < remainder; k++) {
         out[order[static_cast<std::size_t>(k) % n]]++;
+    }
+    return out;
+}
+
+std::vector<Slice> roundToLots(const std::vector<Slice>& slices, std::int64_t lotSize) {
+    if (lotSize < 1) {
+        throw std::invalid_argument("lotSize must be >= 1");
+    }
+    std::vector<Slice> out = slices;
+    std::int64_t cumulative = 0;
+    std::int64_t released = 0;
+    for (std::size_t i = 0; i < out.size(); i++) {
+        cumulative += slices[i].quantity;
+        std::int64_t upTo = i + 1 == out.size() ? cumulative : cumulative - cumulative % lotSize;
+        out[i].quantity = upTo - released;
+        released = upTo;
     }
     return out;
 }
