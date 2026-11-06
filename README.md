@@ -15,7 +15,7 @@ A C++26 quant finance and low-latency trading library, with no external dependen
 | Live lane | `trading`, `orderbook`, `marketdata` | Fail-closed gate, order lifecycle, kill sources, bus, rings, book |
 | Connectivity | `fix`, `sbe`, `persist`, `data` | FIX 4.4 subset with venue bridge, ITCH subset, MoldUDP64, IEX, checkpoints |
 
-Read [ARCHITECTURE](docs/ARCHITECTURE.md), the guided tour in [LEARN](docs/LEARN.md), and the [CHANGELOG](CHANGELOG.md). Version 2.0.0 is breaking.
+Read [ARCHITECTURE](docs/ARCHITECTURE.md), the guided tour in [LEARN](docs/LEARN.md), and the [CHANGELOG](CHANGELOG.md). Version 2.0.0 was breaking; 2.1.0 requires a C++26 compiler.
 
 ## Evidence
 
