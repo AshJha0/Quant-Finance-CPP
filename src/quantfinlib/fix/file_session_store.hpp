@@ -1,27 +1,35 @@
 // Port of com.quantfinlib.fix.FileSessionStore (Java): durable
-// FixSessionStore backed by two files in a directory: seqnums.dat (16
-// bytes, flushed synchronously on every update -- the "rwd" mode of the
-// Java RandomAccessFile) and an append-only messages.dat replayed into
-// memory on open. Reopening the store after a process restart resumes the
-// FIX session with sequence-number continuation and a fully serviceable
-// resend history. The on-disk record format is private to this port (not
-// byte-compatible with the Java store -- there is no cross-runtime file
-// interop requirement).
+// FixSessionStore backed by two files in a directory.
+//
+// seqnums.dat holds two CRC-protected slots written alternately, so a torn
+// write always leaves the previous counters readable. messages.dat is a
+// magic header then an append-only run of length + CRC records, replayed
+// into memory on open. A torn tail (crash mid-append) is truncated away; a
+// bad record with good data after it is real corruption and fails the open.
+// Every write is fsynced unless the constructor is told otherwise.
+//
+// The on-disk format is private to this port (not byte-compatible with the
+// Java store) and has no reader for the earlier unchecked C++ layout: such
+// a directory fails to open rather than being misread.
 #pragma once
 
-#include <fstream>
 #include <mutex>
 #include <string>
 #include <unordered_map>
 
 #include "quantfinlib/fix/fix_session_store.hpp"
+#include "quantfinlib/persist/durable_file.hpp"
 
 namespace quantfinlib {
 
 class FileSessionStore : public FixSessionStore {
 public:
-    /** Throws std::runtime_error if the directory or files cannot be opened. */
-    explicit FileSessionStore(const std::string& directory);
+    /**
+     * Throws std::runtime_error if the directory or files cannot be opened
+     * or fail their integrity checks. syncEveryWrite = false leaves durability
+     * to the OS, for tests and replay tools only.
+     */
+    explicit FileSessionStore(const std::string& directory, bool syncEveryWrite = true);
     ~FileSessionStore() override;
 
     FileSessionStore(const FileSessionStore&) = delete;
@@ -33,19 +41,25 @@ public:
     void saveIncomingSeq(std::int64_t expectedSeq) override;
     void storeMessage(std::int64_t seq, StoredMessage message) override;
     std::optional<StoredMessage> retrieve(std::int64_t seq) override;
+    void reset() override;
 
+    /** Later writes throw. Safe to call twice. */
     void close();
 
 private:
+    void loadSeqs(const std::string& path);
+    void loadMessages(const std::string& path);
     void persistSeqs();
 
     std::mutex mutex_;
-    std::fstream seqFile_;
-    std::ofstream messageAppender_;
+    DurableFile seqFile_;
+    DurableFile messageFile_;
     std::unordered_map<std::int64_t, StoredMessage> messages_;
     std::int64_t nextOutgoing_ = 1;
     std::int64_t expectedIncoming_ = 1;
-    bool closed_ = false;
+    std::uint64_t seqGeneration_ = 0;
+    std::uint64_t appendOffset_ = 0;
+    bool syncEveryWrite_;
 };
 
 }  // namespace quantfinlib

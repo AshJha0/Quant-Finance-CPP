@@ -35,6 +35,11 @@ foreach(test_src ${QFL_TESTS})
     add_test(NAME ${test_name} COMMAND ${test_name})
 endforeach()
 
+option(QFL_FUZZ "Build libFuzzer targets (needs clang)" OFF)
+if(QFL_FUZZ)
+    add_subdirectory(fuzz)
+endif()
+
 # One benchmark executable per benchmarks/*_bench.cpp (built, never run by
 # CTest: nanosecond numbers belong to a quiet, manually invoked machine).
 file(GLOB QFL_BENCHES CONFIGURE_DEPENDS benchmarks/*_bench.cpp)

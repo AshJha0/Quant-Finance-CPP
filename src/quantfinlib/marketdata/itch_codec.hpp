@@ -1,9 +1,14 @@
 // Port of com.quantfinlib.marketdata.ItchCodec (Java): ITCH 5.0-style
-// binary market-data codec: the message subset that drives a full-depth
-// (L3) book -- add, add-with-attribution, execute, cancel, delete,
-// replace, and off-book trade -- with the exact field layout and
-// big-endian encoding of the Nasdaq TotalView-ITCH 5.0 specification.
-// Styled after the spec for realism; not a certified implementation.
+// binary market-data codec: the messages that drive a full-depth (L3) book
+// -- add, add-with-attribution, execute, execute-with-price, cancel, delete,
+// replace, and off-book trade -- with the exact field layout and big-endian
+// encoding of the Nasdaq TotalView-ITCH 5.0 specification. length() also
+// knows every other 5.0 type so a decoder can skip them. Styled after the
+// spec for realism; not a certified implementation.
+//
+// Bounds: wire bytes must go through complete() or the three-argument
+// View::wrap, so a short datagram is skipped instead of read past its end.
+// The two-argument wrap is for buffers the caller has already validated.
 //
 // Decoding is a flyweight: View::wrap points at a message inside a
 // caller-owned buffer and every getter reads the bytes directly -- no
@@ -36,6 +41,7 @@ public:
     static constexpr std::uint8_t ADD = 'A';
     static constexpr std::uint8_t ADD_MPID = 'F';
     static constexpr std::uint8_t EXECUTED = 'E';
+    static constexpr std::uint8_t EXECUTED_WITH_PRICE = 'C';
     static constexpr std::uint8_t CANCEL = 'X';
     static constexpr std::uint8_t DELETE = 'D';
     static constexpr std::uint8_t REPLACE = 'U';
@@ -46,18 +52,43 @@ public:
 
     ItchCodec() = delete;
 
-    /** Wire length of a message type; -1 for types outside the subset. */
+    /** Wire length of an ITCH 5.0 message type; -1 for an unknown type. */
     static int length(std::uint8_t type) {
         switch (type) {
+            case 'S': return 12;            // system event
+            case 'R': return 39;            // stock directory
+            case 'H': return 25;            // trading action
+            case 'Y': return 20;            // Reg SHO restriction
+            case 'L': return 26;            // market participant position
+            case 'V': return 35;            // MWCB decline level
+            case 'W': return 12;            // MWCB status
+            case 'K': return 28;            // IPO quoting period
+            case 'J': return 35;            // LULD auction collar
+            case 'h': return 21;            // operational halt
             case ADD: return 36;
             case ADD_MPID: return 40;
             case EXECUTED: return 31;
+            case EXECUTED_WITH_PRICE: return 36;
             case CANCEL: return 23;
             case DELETE: return 19;
             case REPLACE: return 35;
             case TRADE: return 44;
+            case 'Q': return 40;            // cross trade
+            case 'B': return 19;            // broken trade
+            case 'I': return 50;            // net order imbalance indicator
+            case 'N': return 20;            // retail price improvement indicator
+            case 'O': return 48;            // direct listing with capital raise
             default: return -1;
         }
+    }
+
+    /** True when `available` bytes at `offset` hold one whole message of a known type. */
+    static bool complete(const unsigned char* buffer, int offset, int available) {
+        if (buffer == nullptr || offset < 0 || available < 1) {
+            return false;
+        }
+        int len = length(buffer[offset]);
+        return len > 0 && len <= available;
     }
 
     /** Packs up to 8 ASCII chars into a big-endian value, space-padded (ITCH alpha style). */
@@ -100,11 +131,25 @@ public:
      */
     class View {
     public:
-        /** Points this view at a message; returns *this for chaining. */
+        /** Points this view at a message already known to be complete. */
         View& wrap(const unsigned char* buffer, int offset) {
             buf_ = buffer;
             off_ = offset;
             return *this;
+        }
+
+        /**
+         * Checked wrap for wire bytes: `available` is how many bytes follow
+         * `offset`. Returns false, leaving the view untouched, unless a whole
+         * message of a known type is there.
+         */
+        bool wrap(const unsigned char* buffer, int offset, int available) {
+            if (!complete(buffer, offset, available)) {
+                return false;
+            }
+            buf_ = buffer;
+            off_ = offset;
+            return true;
         }
 
         std::uint8_t type() const { return buf_[off_]; }
@@ -119,7 +164,7 @@ public:
 
         /** Order reference (A/F/E/X/D/P, and the original ref of U via origRef). */
         std::int64_t orderRef() const {
-            assert(hasAny("AFEXDUP") && "no orderRef on this type");
+            assert(hasAny("AFECXDUP") && "no orderRef on this type");
             return u64(off_ + 11);
         }
 
@@ -147,9 +192,9 @@ public:
             return buf_[off_] == REPLACE ? u32(off_ + 27) : u32(off_ + 20);
         }
 
-        /** E: executed shares. X: cancelled shares. */
+        /** E/C: executed shares. X: cancelled shares. */
         std::int64_t deltaShares() const {
-            assert((buf_[off_] == EXECUTED || buf_[off_] == CANCEL)
+            assert(hasAny("ECX")
                    && "no deltaShares on this type");
             return u32(off_ + 19);
         }
@@ -171,11 +216,22 @@ public:
                                         : static_cast<int>(u32(off_ + 32));
         }
 
-        /** E/P: the venue's match (execution) number. */
+        /** E/C/P: the venue's match (execution) number. */
         std::int64_t matchNumber() const {
-            assert((buf_[off_] == EXECUTED || buf_[off_] == TRADE)
-                   && "no matchNumber on this type");
+            assert(hasAny("ECP") && "no matchNumber on this type");
             return buf_[off_] == TRADE ? u64(off_ + 36) : u64(off_ + 23);
+        }
+
+        /** C: 'Y' when the execution should print to the tape. */
+        std::uint8_t printable() const {
+            assert(buf_[off_] == EXECUTED_WITH_PRICE && "printable only on C");
+            return buf_[off_ + 31];
+        }
+
+        /** C: execution price in 0.0001 ticks. */
+        int executionPriceTick() const {
+            assert(buf_[off_] == EXECUTED_WITH_PRICE && "execution price only on C");
+            return static_cast<int>(u32(off_ + 32));
         }
 
     private:
@@ -236,6 +292,20 @@ public:
         p32(buf, off + 19, executedShares);
         p64(buf, off + 23, matchNumber);
         return 31;
+    }
+
+    /** Encodes an Order Executed With Price (C); returns bytes written. */
+    static int encodeExecutedWithPrice(unsigned char* buf, int off, int stockLocate,
+                                       std::int64_t timestampNanos, std::int64_t orderRef,
+                                       std::int64_t executedShares, std::int64_t matchNumber,
+                                       bool printable, int priceTick) {
+        header(buf, off, EXECUTED_WITH_PRICE, stockLocate, timestampNanos);
+        p64(buf, off + 11, orderRef);
+        p32(buf, off + 19, executedShares);
+        p64(buf, off + 23, matchNumber);
+        buf[off + 31] = printable ? 'Y' : 'N';
+        p32(buf, off + 32, priceTick);
+        return 36;
     }
 
     /** Encodes an Order Cancel (X, partial cancel); returns bytes written. */

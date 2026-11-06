@@ -36,6 +36,13 @@ std::optional<FixSessionStore::StoredMessage> InMemorySessionStore::retrieve(std
     return it->second;
 }
 
+void InMemorySessionStore::reset() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    messages_.clear();
+    nextOutgoing_ = 1;
+    expectedIncoming_ = 1;
+}
+
 std::shared_ptr<FixSessionStore> makeInMemorySessionStore() {
     return std::make_shared<InMemorySessionStore>();
 }

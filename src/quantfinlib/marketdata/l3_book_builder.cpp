@@ -56,6 +56,10 @@ L3BookBuilder::L3BookBuilder(int stockLocate, int minPriceTick, int maxPriceTick
 // Feed entry points
 // ------------------------------------------------------------------
 
+int L3BookBuilder::onMessage(const unsigned char* buf, int offset, int available) {
+    return ItchCodec::complete(buf, offset, available) ? onMessage(buf, offset) : 0;
+}
+
 int L3BookBuilder::onMessage(const unsigned char* buf, int offset) {
     ItchCodec::View& v = view_.wrap(buf, offset);
     int len = ItchCodec::length(v.type());
@@ -70,6 +74,12 @@ int L3BookBuilder::onMessage(const unsigned char* buf, int offset) {
             break;
         case ItchCodec::EXECUTED:
             onExecute(v.orderRef(), v.deltaShares());
+            break;
+        case ItchCodec::EXECUTED_WITH_PRICE:
+            onExecute(v.orderRef(), v.deltaShares());
+            if (v.printable() == 'Y') {
+                lastTradeTick_ = v.executionPriceTick();
+            }
             break;
         case ItchCodec::CANCEL:
             onCancel(v.orderRef(), v.deltaShares());

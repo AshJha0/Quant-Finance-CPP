@@ -103,6 +103,13 @@ class Checkpoint {
 public:
     static constexpr std::int32_t MAGIC = 0x51464C43;  // "QFLC"
     static constexpr std::int32_t FORMAT_VERSION = 1;
+    /**
+     * Reserved final section holding a big-endian CRC-32 of every preceding
+     * byte. It keeps format 1: older files without it still load, and other
+     * language readers ignore it as a section nobody asks for. The Reader
+     * hides it from names().
+     */
+    static constexpr const char* CRC_SECTION = "__crc32";
 
     Checkpoint() = delete;
 
@@ -127,8 +134,13 @@ public:
         Writer& section(const std::string& name, const StateWriter& body);
 
         /**
-         * Commits: temp file beside the target, then a rename over it.
-         * No-op if a section body threw, or if already closed.
+         * Commits: temp file beside the target, written with checked I/O and
+         * fsynced, then a rename over it and a directory fsync. No-op if a
+         * section body threw, or if already closed. The destructor commits
+         * too, except during stack unwinding.
+         *
+         * @throws std::runtime_error on any write failure; the existing
+         *         checkpoint is left untouched
          */
         void close();
 
@@ -137,6 +149,7 @@ public:
         std::vector<std::pair<std::string, std::vector<std::uint8_t>>> sections_;
         bool failed_ = false;
         bool closed_ = false;
+        int uncaughtAtStart_ = 0;
     };
 
     /** Random access to a loaded checkpoint's sections by name. */
@@ -158,9 +171,17 @@ public:
         /** The section names present, in file order. */
         const std::vector<std::string>& names() const { return order_; }
 
+        /**
+         * True when the file carried the CRC trailer and it matched. False
+         * for files from older writers, where truncation at a section
+         * boundary cannot be detected.
+         */
+        bool integrityVerified() const { return verified_; }
+
     private:
         std::unordered_map<std::string, std::vector<std::uint8_t>> sections_;
         std::vector<std::string> order_;
+        bool verified_ = false;
     };
 
     /** Opens a writer; nothing touches `path` until close(). */
