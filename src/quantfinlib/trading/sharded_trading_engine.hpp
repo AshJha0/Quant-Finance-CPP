@@ -13,6 +13,7 @@
 //  - publish() fans a tick to every shard hosting the symbol -- zero
 //    allocation on the hot path, single producer thread (or one producer
 //    per disjoint symbol set);
+//    it also refreshes each hosting gate's collar reference;
 //  - strategies/quoters attach per shard via bus(shard) exactly as they
 //    would to a standalone bus -- the shard is invisible to them.
 //

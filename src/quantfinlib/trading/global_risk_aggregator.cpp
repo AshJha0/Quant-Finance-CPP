@@ -13,8 +13,12 @@ GlobalRiskAggregator::GlobalRiskAggregator(std::vector<HftRiskGate*> gates,
           maxGrossNotional_(maxGrossNotional),
           resumeNotional_(maxGrossNotional * resumeFraction),
           pollIntervalNanos_(pollIntervalNanos) {
-    if (gates_.empty() || maxGrossNotional <= 0 || resumeFraction <= 0 || resumeFraction >= 1
-            || pollIntervalNanos <= 0) {
+    bool nullGate = false;
+    for (HftRiskGate* gate : gates_) {
+        nullGate = nullGate || gate == nullptr;
+    }
+    if (gates_.empty() || nullGate || !(maxGrossNotional > 0) || !(resumeFraction > 0)
+            || !(resumeFraction < 1) || pollIntervalNanos <= 0) {
         throw std::invalid_argument("need gates, cap > 0, 0 < resumeFraction < 1, poll > 0");
     }
     monitor_ = std::thread([this] { monitorLoop(); });
@@ -28,7 +32,7 @@ double GlobalRiskAggregator::grossNotional() const {
             std::int64_t position = gate->position(s);
             if (position != 0) {
                 double ref = gate->referencePrice(s);
-                if (ref == ref) {  // NaN-safe: unpriced symbols contribute 0
+                if (ref == ref) {  // unpriced symbols are caught by unpricedPositions()
                     gross += std::fabs(static_cast<double>(position)) * ref;
                 }
             }
@@ -37,28 +41,43 @@ double GlobalRiskAggregator::grossNotional() const {
     return gross;
 }
 
+int GlobalRiskAggregator::unpricedPositions() const {
+    int unpriced = 0;
+    for (HftRiskGate* gate : gates_) {
+        int n = gate->symbolCapacity();
+        for (int s = 0; s < n; s++) {
+            double ref = gate->referencePrice(s);
+            if (gate->position(s) != 0 && ref != ref) {
+                unpriced++;
+            }
+        }
+    }
+    return unpriced;
+}
+
+bool GlobalRiskAggregator::manualReset() {
+    if (!(grossNotional() < resumeNotional_) || unpricedPositions() != 0) {
+        return false;
+    }
+    for (HftRiskGate* gate : gates_) {
+        gate->reset(HftRiskGate::KILL_AGGREGATOR);
+    }
+    tripped_.store(false, std::memory_order_release);
+    return true;
+}
+
 void GlobalRiskAggregator::monitorLoop() {
     while (running_.load(std::memory_order_acquire)) {
         double gross = grossNotional();
         lastGross_.store(gross, std::memory_order_release);
-        if (!tripped_.load(std::memory_order_relaxed) && gross > maxGrossNotional_) {
-            // Snapshot which gates were ALREADY killed (ops holds, a second
-            // breaker): recovery must not clear a kill this aggregator did
-            // not set.
-            killedBeforeTrip_.assign(gates_.size(), false);
-            for (std::size_t i = 0; i < gates_.size(); i++) {
-                killedBeforeTrip_[i] = gates_[i]->isKilled();
-                gates_[i]->kill(true);
+        // !(gross <= cap) so that a NaN sum trips too.
+        if (!tripped_.load(std::memory_order_acquire)
+                && (!(gross <= maxGrossNotional_) || unpricedPositions() != 0)) {
+            for (HftRiskGate* gate : gates_) {
+                gate->trip(HftRiskGate::KILL_AGGREGATOR);
             }
             tripped_.store(true, std::memory_order_release);
             trips_.fetch_add(1, std::memory_order_acq_rel);
-        } else if (tripped_.load(std::memory_order_relaxed) && gross < resumeNotional_) {
-            for (std::size_t i = 0; i < gates_.size(); i++) {
-                if (!killedBeforeTrip_[i]) {
-                    gates_[i]->kill(false);
-                }
-            }
-            tripped_.store(false, std::memory_order_release);
         }
         std::this_thread::sleep_for(std::chrono::nanoseconds(pollIntervalNanos_));
     }

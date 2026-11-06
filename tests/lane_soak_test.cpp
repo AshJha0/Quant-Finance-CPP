@@ -55,7 +55,8 @@ TEST(oneMillionTicksThroughBusGateBookConserveExactlyWithinDropBudget) {
     int symbol = bus.registerSymbol("SOAK");
 
     HftRiskGate gate(4);
-    gate.maxOrderQuantity(10000).maxOrderNotional(1e9).maxPositionQuantity(1'000'000'000LL);
+    gate.maxOrderQuantity(10000).maxOrderNotional(1e9).maxPositionQuantity(1'000'000'000LL)
+        .disableReferenceCheck();
 
     HftOrderGateway gw(1 << 16, gate, false);
 
@@ -84,8 +85,11 @@ TEST(oneMillionTicksThroughBusGateBookConserveExactlyWithinDropBudget) {
         }
     });
 
-    gw.addOrderListener([&](std::int64_t, int, Side side, std::int64_t qty, double price,
+    gw.addOrderListener([&](std::int64_t id, int, Side side, std::int64_t qty, double price,
                             std::int64_t ts) {
+        // The soak counts orders into the book, not their lifecycle: hand the
+        // slot back so a million resting orders need no million-slot table.
+        gw.onOrderReject(id);
         std::int64_t r = book.submitLimit(side, static_cast<int>(price), qty, ts);
         if (r < 0) {
             bookRejected.fetch_add(1, std::memory_order_relaxed);

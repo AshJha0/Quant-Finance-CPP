@@ -52,7 +52,8 @@ TEST(configValidatesArguments) {
 
 TEST(basicTickProducesTwoSidedQuoteAroundMidWithNoSkew) {
     HftRiskGate gate(2);
-    gate.maxOrderQuantity(10000).maxOrderNotional(1e9).maxPositionQuantity(1000000);
+    gate.maxOrderQuantity(10000).maxOrderNotional(1e9).maxPositionQuantity(1000000)
+        .disableReferenceCheck();
     HftOrderGateway gw(gate);
     std::vector<Fill> orders;
     std::atomic<int> count{0};
@@ -80,7 +81,8 @@ TEST(basicTickProducesTwoSidedQuoteAroundMidWithNoSkew) {
 
 TEST(longInventoryShadesBothSidesDown) {
     HftRiskGate gate(2);
-    gate.maxOrderQuantity(10000).maxOrderNotional(1e9).maxPositionQuantity(1000000);
+    gate.maxOrderQuantity(10000).maxOrderNotional(1e9).maxPositionQuantity(1000000)
+        .disableReferenceCheck();
     HftOrderGateway gw(gate);
     gw.start();
     // Book a long position directly on the gate (as a fill would).
@@ -107,7 +109,8 @@ TEST(longInventoryShadesBothSidesDown) {
 
 TEST(conflationSuppressesOnlyWhenBothMoveAndIntervalGatesPass) {
     HftRiskGate gate(2);
-    gate.maxOrderQuantity(10000).maxOrderNotional(1e9).maxPositionQuantity(1000000);
+    gate.maxOrderQuantity(10000).maxOrderNotional(1e9).maxPositionQuantity(1000000)
+        .disableReferenceCheck();
     HftOrderGateway gw(gate);
     gw.start();
 
@@ -137,7 +140,8 @@ TEST(withConflationZeroIntervalDisablesConflationEntirely) {
     // than 0 ns", so EVERY tick requotes regardless of how small the move
     // is -- withConflation(0, x) does not mean "suppress on move alone".
     HftRiskGate gate(2);
-    gate.maxOrderQuantity(10000).maxOrderNotional(1e9).maxPositionQuantity(1000000);
+    gate.maxOrderQuantity(10000).maxOrderNotional(1e9).maxPositionQuantity(1000000)
+        .disableReferenceCheck();
     HftOrderGateway gw(gate);
     gw.start();
 
@@ -153,7 +157,8 @@ TEST(withConflationZeroIntervalDisablesConflationEntirely) {
 
 TEST(withMinMoveIsPurelyMoveGatedRegardlessOfAge) {
     HftRiskGate gate(2);
-    gate.maxOrderQuantity(10000).maxOrderNotional(1e9).maxPositionQuantity(1000000);
+    gate.maxOrderQuantity(10000).maxOrderNotional(1e9).maxPositionQuantity(1000000)
+        .disableReferenceCheck();
     HftOrderGateway gw(gate);
     gw.start();
 
@@ -177,7 +182,8 @@ TEST(mixedBookUsesPerSymbolConfigViaConfigureSymbol) {
     // both only because configureSymbol overrides the per-symbol default.
     HftRiskGate gate(2);
     // Cap comfortably above the 1,000,000-unit quote size used below.
-    gate.maxOrderQuantity(2000000).maxOrderNotional(1e9).maxPositionQuantity(10000000);
+    gate.maxOrderQuantity(2000000).maxOrderNotional(1e9).maxPositionQuantity(10000000)
+        .disableReferenceCheck();
     HftOrderGateway gw(gate);
     gw.start();
 
@@ -208,7 +214,8 @@ TEST(mixedBookUsesPerSymbolConfigViaConfigureSymbol) {
 
 TEST(gridSnapRoundsBidDownAndAskUpTowardPassivity) {
     HftRiskGate gate(2);
-    gate.maxOrderQuantity(10000).maxOrderNotional(1e9).maxPositionQuantity(1000000);
+    gate.maxOrderQuantity(10000).maxOrderNotional(1e9).maxPositionQuantity(1000000)
+        .disableReferenceCheck();
     HftOrderGateway gw(gate);
     gw.start();
 

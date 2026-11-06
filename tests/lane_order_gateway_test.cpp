@@ -17,7 +17,8 @@ using quantfinlib::Side;
 
 TEST(submitReturnsPositiveIdOnAcceptNegativeReasonOnRejectZeroOnRingFull) {
     HftRiskGate gate(4);
-    gate.maxOrderQuantity(100);
+    gate.maxOrderQuantity(100).maxOrderNotional(1e9).maxPositionQuantity(1000)
+        .disableReferenceCheck();
     HftOrderGateway gw(4, gate, false);   // rounds to 4-slot ring, no consumer started
 
     std::int64_t id1 = gw.submit(0, Side::BUY, 10, 100.0, 1);
@@ -41,7 +42,8 @@ TEST(submitReturnsPositiveIdOnAcceptNegativeReasonOnRejectZeroOnRingFull) {
 
 TEST(venueThreadDeliversEveryAcceptedOrder) {
     HftRiskGate gate(2);
-    gate.maxOrderQuantity(1000);
+    gate.maxOrderQuantity(1000).maxOrderNotional(1e9).maxPositionQuantity(1000000)
+        .disableReferenceCheck();
     HftOrderGateway gw(gate);
 
     std::atomic<int> received{0};
@@ -63,14 +65,19 @@ TEST(venueThreadDeliversEveryAcceptedOrder) {
 
 TEST(twoThreadProducerConsumerConservesEveryOrderUnderSpin) {
     HftRiskGate gate(4);
-    gate.maxOrderQuantity(1000);
+    gate.maxOrderQuantity(1000).maxOrderNotional(1e9).maxPositionQuantity(100000000)
+        .disableReferenceCheck();
     HftOrderGateway gw(64, gate, false);
 
     std::atomic<std::int64_t> delivered{0};
     std::atomic<std::int64_t> deliveredQtySum{0};
-    gw.addOrderListener([&](std::int64_t, int, Side, std::int64_t qty, double, std::int64_t) {
+    // The venue fills each order at once, so reservations and table slots
+    // come back and the producer never meets the position cap.
+    gw.addOrderListener([&](std::int64_t id, int symbolId, Side side, std::int64_t qty, double,
+                            std::int64_t) {
         delivered.fetch_add(1, std::memory_order_relaxed);
         deliveredQtySum.fetch_add(qty, std::memory_order_relaxed);
+        gw.onFill(id, symbolId, side, qty);
     });
     gw.start();
 
@@ -100,6 +107,9 @@ TEST(twoThreadProducerConsumerConservesEveryOrderUnderSpin) {
     EXPECT_TRUE(gw.deliveredCount() == SENT);
     EXPECT_TRUE(delivered.load() == SENT);
     EXPECT_TRUE(deliveredQtySum.load() == sentQtySum);
+    EXPECT_TRUE(gate.position(0) + gate.position(1) + gate.position(2) + gate.position(3)
+                == sentQtySum);
+    EXPECT_TRUE(gw.openOrderCount() == 0);
 }
 
 QTEST_MAIN()

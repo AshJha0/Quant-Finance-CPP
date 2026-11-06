@@ -9,6 +9,8 @@ namespace quantfinlib {
 
 namespace {
 
+bool usablePrice(double p) { return std::isfinite(p) && p > 0; }
+
 double sgn(double v) { return v > 0 ? 1.0 : (v < 0 ? -1.0 : 0.0); }
 
 std::int64_t nowNanos() {
@@ -19,9 +21,26 @@ std::int64_t nowNanos() {
 
 }  // namespace
 
+void PaperTradingGateway::attachRiskGate(HftRiskGate& gate,
+                                         std::unordered_map<std::string, int> symbolIds) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    riskGate_ = &gate;
+    gateSymbolIds_ = std::move(symbolIds);
+}
+
 void PaperTradingGateway::onQuote(const std::string& symbol, double bid, double ask) {
     std::lock_guard<std::mutex> lock(mutex_);
+    if (!usablePrice(bid) || !usablePrice(ask) || bid > ask) {
+        logRejection("bad quote ignored for " + symbol);
+        return;
+    }
     quotes_[symbol] = Quote{bid, ask};
+    if (riskGate_ != nullptr) {
+        auto sit = gateSymbolIds_.find(symbol);
+        if (sit != gateSymbolIds_.end()) {
+            riskGate_->setReferencePrice(sit->second, (bid + ask) / 2);
+        }
+    }
     std::vector<std::int64_t> remaining;
     remaining.reserve(restingIds_.size());
     for (std::int64_t id : restingIds_) {
@@ -89,6 +108,10 @@ bool PaperTradingGateway::cancel(std::int64_t orderId) {
         return false;
     }
     it->second.status = OrderStatus::CANCELED;
+    if (riskGate_ != nullptr) {
+        riskGate_->releaseOpen(gateSymbolIds_.at(it->second.symbol), it->second.side,
+                               it->second.quantity);
+    }
     restingIds_.erase(std::remove(restingIds_.begin(), restingIds_.end(), orderId),
                        restingIds_.end());
     return true;
@@ -166,11 +189,29 @@ PaperTradingGateway::AccountSnapshot PaperTradingGateway::snapshot() const {
                            positionsSnapshotLocked()};
 }
 
-bool PaperTradingGateway::passesRiskGate(WorkingOrder& /*order*/, double /*referencePrice*/) {
-    // No PreTradeLimitChecker port yet (out of this phase's scope) -- this
-    // mirrors Java's `limitChecker == null` default, which every
-    // constructor overload here uses.
-    return true;
+bool PaperTradingGateway::passesRiskGate(WorkingOrder& order, double referencePrice) {
+    std::string reason;
+    if (order.quantity <= 0) {
+        reason = "INVALID_QUANTITY";
+    } else if (!usablePrice(referencePrice)) {
+        reason = "INVALID_PRICE";
+    } else if (riskGate_ != nullptr) {
+        auto sit = gateSymbolIds_.find(order.symbol);
+        if (sit == gateSymbolIds_.end()) {
+            reason = "UNKNOWN_SYMBOL";
+        } else {
+            int code = riskGate_->reserve(sit->second, order.side, order.quantity, referencePrice);
+            if (code != HftRiskGate::OK) {
+                reason = HftRiskGate::reasonName(code);
+            }
+        }
+    }
+    if (reason.empty()) {
+        return true;
+    }
+    order.status = OrderStatus::REJECTED;
+    logRejection("order " + std::to_string(order.id) + ": " + reason + " for " + order.symbol);
+    return false;
 }
 
 void PaperTradingGateway::logRejection(const std::string& entry) {
@@ -183,6 +224,9 @@ void PaperTradingGateway::logRejection(const std::string& entry) {
 void PaperTradingGateway::fill(WorkingOrder& order, double price) {
     std::int64_t qty = order.quantity;
     applyFill(order.symbol, order.side, price, qty);
+    if (riskGate_ != nullptr) {
+        riskGate_->onOrderFill(gateSymbolIds_.at(order.symbol), order.side, qty, qty);
+    }
     order.quantity = 0;
     order.status = OrderStatus::FILLED;
     std::int64_t ts = nowNanos();

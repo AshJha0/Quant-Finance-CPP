@@ -5,6 +5,7 @@
 // acquire/release publication, and producer/consumer sequence caching.
 #pragma once
 
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <vector>
@@ -24,11 +25,24 @@ public:
               sides_(capacity_),
               quantities_(capacity_),
               prices_(capacity_),
-              timestamps_(capacity_) {}
+              timestamps_(capacity_),
+              types_(capacity_),
+              refIds_(capacity_) {}
 
     /** Producer side (trading thread). Returns false when full. */
     bool publish(std::int64_t orderId, int symbolId, Side side, std::int64_t quantity,
                  double price, std::int64_t timestampNanos) {
+        return publishMessage(0, orderId, 0, symbolId, side, quantity, price, timestampNanos);
+    }
+
+    /**
+     * Producer side, typed form: `type` and `refId` travel with the slot so
+     * cancels and replaces stay in sequence behind the orders they refer to.
+     * HftOrderGateway serialises its producers with its own lock.
+     */
+    bool publishMessage(std::uint8_t type, std::int64_t orderId, std::int64_t refId, int symbolId,
+                        Side side, std::int64_t quantity, double price,
+                        std::int64_t timestampNanos) {
         std::int64_t t = tail_.load(std::memory_order_relaxed);   // producer-owned
         if (t - cachedHead_ >= capacity_) {
             cachedHead_ = head_.load(std::memory_order_acquire);
@@ -43,6 +57,8 @@ public:
         quantities_[i] = quantity;
         prices_[i] = price;
         timestamps_[i] = timestampNanos;
+        types_[i] = type;
+        refIds_[i] = refId;
         tail_.store(t + 1, std::memory_order_release);
         return true;
     }
@@ -54,6 +70,17 @@ public:
      */
     template <typename Sink>
     int drainTo(Sink&& sink, int limit) {
+        return drainMessagesTo(
+                [&sink](std::uint8_t, std::int64_t orderId, std::int64_t, int symbolId, Side side,
+                        std::int64_t quantity, double price, std::int64_t timestampNanos) {
+                    sink(orderId, symbolId, side, quantity, price, timestampNanos);
+                },
+                limit);
+    }
+
+    /** As drainTo, for a sink that also takes (type, orderId, refId, ...). */
+    template <typename Sink>
+    int drainMessagesTo(Sink&& sink, int limit) {
         std::int64_t h = head_.load(std::memory_order_relaxed);   // consumer-owned
         if (h >= cachedTail_) {
             cachedTail_ = tail_.load(std::memory_order_acquire);
@@ -64,7 +91,7 @@ public:
         int n = static_cast<int>(std::min<std::int64_t>(cachedTail_ - h, limit));
         for (int k = 0; k < n; k++) {
             int i = static_cast<int>(h & mask_);
-            sink(orderIds_[i], symbolIds_[i], sides_[i] == 0 ? Side::BUY : Side::SELL,
+            sink(types_[i], orderIds_[i], refIds_[i], symbolIds_[i], sides_[i] == 0 ? Side::BUY : Side::SELL,
                  quantities_[i], prices_[i], timestamps_[i]);
             h++;
         }
@@ -94,6 +121,8 @@ private:
     std::vector<std::int64_t> quantities_;
     std::vector<double> prices_;
     std::vector<std::int64_t> timestamps_;
+    std::vector<std::uint8_t> types_;
+    std::vector<std::int64_t> refIds_;
 
     // Padded sequences and per-side caches, one cache line each -- same
     // reasoning as TickRingBuffer: the trading thread stores cachedHead
