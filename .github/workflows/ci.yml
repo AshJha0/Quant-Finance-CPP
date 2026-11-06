@@ -15,10 +15,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { name: gcc-release, cxx: g++, type: Release, flags: "" }
-          - { name: clang-release, cxx: clang++, type: Release, flags: "" }
-          - { name: asan-ubsan, cxx: clang++, type: RelWithDebInfo, flags: "-fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer" }
-          - { name: tsan, cxx: clang++, type: RelWithDebInfo, flags: "-fsanitize=thread" }
+          - { name: gcc-release, cxx: g++-14, type: Release, flags: "" }
+          - { name: clang-release, cxx: clang++-18, type: Release, flags: "" }
+          - { name: asan-ubsan, cxx: clang++-18, type: RelWithDebInfo, flags: "-fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer" }
+          - { name: tsan, cxx: clang++-18, type: RelWithDebInfo, flags: "-fsanitize=thread" }
     name: ${{ matrix.name }}
     steps:
       - uses: actions/checkout@v4

@@ -1,6 +1,6 @@
 # Quant-Finance-CPP
 
-A C++20 quant finance and low-latency trading library, with no external dependencies. It began as a port of the Java [Quant-Finance-Library](https://github.com/AshJha0/Quant-Finance-Library) v1.17 and has since taken selected fixes from Java 4.0, plus its own work.
+A C++26 quant finance and low-latency trading library, with no external dependencies. It began as a port of the Java [Quant-Finance-Library](https://github.com/AshJha0/Quant-Finance-Library) v1.17 and has since taken selected fixes from Java 4.0, plus its own work.
 
 **What this is:** a verified research and engineering reference. **What it is not:** a production trading system. It is not venue-certified, has no TLS, and contains no evidence of trading edge.
 
@@ -55,6 +55,8 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ctest --test-dir build --output-on-failure
 ```
+
+The library builds as C++26. Compilers do not yet ship all of it: on GCC 15 and Clang 21, saturating arithmetic is available, while contracts, reflection, hazard pointers and RCU are not, so the code does not use those.
 
 Linux with GCC or Clang is the main platform; MinGW is tested in CI. Benchmarks use GCC builtins and do not build on MSVC.
 

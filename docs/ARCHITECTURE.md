@@ -11,7 +11,7 @@ trading system: see [What this is not](#what-this-is-not).
 
 ## Packages and dependency direction
 
-One static library, `quantfinlib`, C++20, standard library only (plus
+One static library, `quantfinlib`, C++26, standard library only (plus
 `ws2_32` on Windows). Dependencies below come from the `#include` lines.
 
 | Layer | Packages | Depends on |

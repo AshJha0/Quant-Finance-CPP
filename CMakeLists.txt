@@ -3,7 +3,7 @@ project(quant_finance_cpp VERSION 2.0.0 LANGUAGES CXX)
 
 # C++ port of Quant-Finance-Library (Java). Zero external dependencies:
 # the standard library only, tests on a vendored micro-harness.
-set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD 26)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 if(NOT CMAKE_BUILD_TYPE)

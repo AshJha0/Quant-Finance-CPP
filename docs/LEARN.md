@@ -1,6 +1,6 @@
 # Learning quantfinlib in C++
 
-A guide to the C++20 library in this repository: how it is organised, a
+A guide to the C++26 library in this repository: how it is organised, a
 reading path through its packages, and experiments you can compile and
 run. It began as a port of
 [Quant-Finance-Library](https://github.com/AshJha0/Quant-Finance-Library)
@@ -93,7 +93,7 @@ cmake --build build --target quantfinlib
 Then compile any snippet from the repository root:
 
 ```bash
-g++ -std=c++20 -O2 -I src t.cpp build/libquantfinlib.a -pthread -o t && ./t
+g++ -std=c++26 -O2 -I src t.cpp build/libquantfinlib.a -pthread -o t && ./t
 ```
 
 ### Stop 1 -- `util`: the numerical bedrock
