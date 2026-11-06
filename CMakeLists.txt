@@ -40,6 +40,11 @@ if(QFL_FUZZ)
     add_subdirectory(fuzz)
 endif()
 
+# The IEX replay tool, not a test: see docs/REPLAY_VALIDATION.md.
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tools/replay/CMakeLists.txt)
+    add_subdirectory(tools/replay)
+endif()
+
 # One benchmark executable per benchmarks/*_bench.cpp (built, never run by
 # CTest: nanosecond numbers belong to a quiet, manually invoked machine).
 file(GLOB QFL_BENCHES CONFIGURE_DEPENDS benchmarks/*_bench.cpp)
