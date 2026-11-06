@@ -3,6 +3,7 @@
 // from the test body, so each ordering is deliberate.
 #include "quantfinlib/trading/fix_venue_bridge.hpp"
 
+#include <atomic>
 #include <chrono>
 #include <deque>
 #include <functional>
@@ -198,6 +199,30 @@ TEST(venueRejectReleasesTheReservation) {
     EXPECT_TRUE(r.gateway.openOrderCount() == 0);
     EXPECT_TRUE(r.gate.openQuantity(0, Side::SELL) == 0);
     EXPECT_TRUE(!r.gate.isKilled());
+}
+
+TEST(initiateReturnsOnlyAfterTheListenerHasTheSession) {
+    // An order sent straight after initiate() must find a ready listener.
+    struct SlowLogon : FixSession::Listener {
+        std::atomic<bool> ready{false};
+        void onLogon(FixSession&) override {
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            ready.store(true);
+        }
+    } slow;
+    ScriptedVenue venue;
+    FixServerSocket server{0};
+    auto pending = std::async(std::launch::async, [&] {
+        return FixSession::accept(server, FixSession::Config("VENUE", "US", 30), venue,
+                                  std::make_shared<InMemorySessionStore>());
+    });
+    auto client = FixSession::initiate("127.0.0.1", server.port(),
+                                       FixSession::Config("US", "VENUE", 30), slow,
+                                       std::make_shared<InMemorySessionStore>());
+    EXPECT_TRUE(slow.ready.load());
+    auto acceptor = pending.get();
+    client.reset();
+    acceptor.reset();
 }
 
 TEST(cancelRejectKeepsTheOrderAndTheVenueNameForIt) {

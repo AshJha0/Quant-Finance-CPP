@@ -816,7 +816,13 @@ void FixSession::dispatch(const FixMessage& m, std::int64_t seq, bool resetAppli
             std::lock_guard<std::mutex> lock(logonMutex_);
             logonSucceeded_ = true;
         }
-        countDownLogon();
+        // Open the latch only after the listener has run: initiate() and accept()
+        // return on it, and a caller may send at once. A listener that is still
+        // being told about the session would refuse that order.
+        struct LatchGuard {
+            FixSession& session;
+            ~LatchGuard() { session.countDownLogon(); }
+        } latch{*this};
         // Raw message too, so acceptors can inspect Username/Password (553/554).
         listener_.onMessage(*this, m);
         listener_.onLogon(*this);
