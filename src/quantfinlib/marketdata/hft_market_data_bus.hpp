@@ -10,15 +10,23 @@
 //    Thread.onSpinWait() analogue) for minimum hand-off latency, or park
 //    (sleep_for) when latency matters less than CPU.
 //
-// Listener storage: Java holds per-symbol listener arrays in an
-// AtomicReferenceArray<TickListener[]> plus a volatile global array, so
-// subscribe() (synchronized, copy-on-write) never blocks the consumer
-// thread's plain read. The C++ mirror is
-// std::atomic<std::shared_ptr<const std::vector<TickListener>>>: subscribe
-// swaps in a new vector under a setup mutex, dispatch() loads the shared_ptr
-// with one atomic load (lock-free on libstdc++/x86_64) and the old vector is
-// freed only once the last reader (including one mid-dispatch) drops it --
-// the C++ analogue of never mutating a published Java array in place.
+// Listener storage: each symbol slot (and the global slot) is one
+// std::atomic<const ListenerList*>. The list behind the pointer is immutable
+// once published, so dispatch() is a single acquire load of a raw pointer,
+// which is lock-free on every target we build for. (This replaced
+// std::atomic<std::shared_ptr>, which is mutex-backed in libstdc++.)
+// subscribe() builds a new list under a setup mutex and swaps it in. The old
+// list may still be in use by a dispatch in flight, so it is retired, not
+// freed: retired lists are released by stop() after the consumer has joined,
+// and by the destructor. A bus that keeps subscribing while running holds
+// one small list per subscribe until then; subscribing is a setup action.
+//
+// Bad input on the hot path: publish() returns false for a symbolId outside
+// [0, maxSymbols) and counts it, so a bad id never reaches an array index.
+//
+// Listener exceptions: a listener that throws is counted and skipped for
+// that tick. The remaining listeners still run, the consumer keeps draining,
+// and the process does not terminate. Watch listenerErrorCount().
 //
 // Dispatch cost note: each subscribed listener is a std::function call;
 // with three or more distinct listeners on one symbol this is the
@@ -29,9 +37,11 @@
 
 #include <atomic>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -47,12 +57,13 @@ using TickListener = std::function<void(int symbolId, double price, double size,
 
 class HftMarketDataBus {
 public:
+    /** @throws std::invalid_argument when maxSymbols <= 0 or the ring is too large. */
     HftMarketDataBus(int ringCapacity, int maxSymbols, bool busySpin);
 
     /** Parked (non-spinning) consumer with a 64K ring and up to 1024 symbols. */
     HftMarketDataBus() : HftMarketDataBus(1 << 16, 1024, false) {}
 
-    ~HftMarketDataBus() { stop(); }
+    ~HftMarketDataBus();
 
     HftMarketDataBus(const HftMarketDataBus&) = delete;
     HftMarketDataBus& operator=(const HftMarketDataBus&) = delete;
@@ -66,10 +77,18 @@ public:
 
     int symbolId(const std::string& symbol) const { return registry_.id(symbol); }
 
-    std::string symbol(int id) const { return registry_.symbol(id); }
+    /** @throws std::out_of_range for an id that was never registered. */
+    std::string symbol(int id) const {
+        if (id < 0 || id >= registry_.size()) {
+            throw std::out_of_range("symbol id " + std::to_string(id) + " not registered");
+        }
+        return registry_.symbol(id);
+    }
 
+    /** @throws std::out_of_range on a bad symbolId, std::invalid_argument on an empty listener. */
     void subscribe(int symbolId, TickListener listener);
 
+    /** @throws std::invalid_argument on an empty listener. */
     void subscribeAll(TickListener listener);
 
     void start();
@@ -86,7 +105,8 @@ public:
     /**
      * Publishes a tick; single producer thread, zero allocation. Returns
      * false when the ring is full (caller decides: spin, drop, or shed
-     * load).
+     * load) or when symbolId is outside [0, maxSymbols) (never retry that;
+     * see invalidSymbolCount()).
      */
     bool publish(int symbolId, double price, double size, std::int64_t timestampNanos);
 
@@ -94,7 +114,7 @@ public:
     // Observability
     // ------------------------------------------------------------------
 
-    /** Last traded price by symbol id; NaN before the first tick. */
+    /** Last traded price by symbol id; NaN before the first tick or for a bad id. */
     double latestPrice(int symbolId) const;
 
     double latestPrice(const std::string& symbol) const { return latestPrice(registry_.id(symbol)); }
@@ -106,14 +126,32 @@ public:
      * retrying producer increments this per attempt; it does not by itself
      * mean ticks were lost -- that is the caller's backpressure policy.
      */
-    std::int64_t ringFullCount() const { return ringFull_; }
+    std::int64_t ringFullCount() const { return ringFull_.load(std::memory_order_relaxed); }
+
+    /** publish() calls refused because symbolId was out of range. */
+    std::int64_t invalidSymbolCount() const {
+        return invalidSymbol_.load(std::memory_order_relaxed);
+    }
+
+    /** Listener invocations that ended in an exception. */
+    std::int64_t listenerErrorCount() const {
+        return listenerErrors_.load(std::memory_order_relaxed);
+    }
+
+    /** True when dispatch's listener load cannot fall back to a lock. */
+    static constexpr bool listenerLoadIsLockFree() {
+        return std::atomic<const std::vector<const TickListener*>*>::is_always_lock_free;
+    }
 
 private:
-    using ListenerVec = std::vector<TickListener>;
-    using ListenerVecPtr = std::shared_ptr<const ListenerVec>;
+    using ListenerList = std::vector<const TickListener*>;
 
     void dispatch(int symbolId, double price, double size, std::int64_t timestampNanos);
+    void invoke(const ListenerList& list, int symbolId, double price, double size,
+                std::int64_t timestampNanos);
     void consumeLoop();
+    void addListener(std::atomic<const ListenerList*>& slot, TickListener listener);
+    bool validSymbol(int symbolId) const { return symbolId >= 0 && symbolId < maxSymbols_; }
 
     SymbolRegistry registry_;
     TickRingBuffer ring_;
@@ -121,16 +159,24 @@ private:
     const bool busySpin_;
 
     std::unique_ptr<std::atomic<double>[]> latestPrice_;
-    std::vector<std::atomic<ListenerVecPtr>> symbolListeners_;
-    std::atomic<ListenerVecPtr> globalListeners_;
+    std::vector<std::atomic<const ListenerList*>> symbolListeners_;
+    std::atomic<const ListenerList*> globalListeners_{nullptr};
 
-    std::mutex setupMutex_;   // guards subscribe/subscribeAll/start/stop (Java's `synchronized`)
+    std::mutex lifecycleMutex_;   // serializes start/stop, so two consumers never overlap
+    std::mutex setupMutex_;       // guards listeners_ and retired_
+    std::deque<TickListener> listeners_;   // owns every listener; deque keeps addresses stable
+    std::vector<std::unique_ptr<const ListenerList>> retired_;
+
     std::atomic<bool> running_{false};
     // Consumer-thread counter, updated once per drain batch with a release
     // store -- a per-tick store would pay a fence on every dispatch for an
     // observability-only number.
     std::atomic<std::int64_t> processed_{0};
-    std::int64_t ringFull_ = 0;   // single-writer (producer thread)
+    // Single-writer counters read from other threads: relaxed load + store
+    // compile to plain moves, with no locked instruction on the hot path.
+    std::atomic<std::int64_t> ringFull_{0};        // producer thread
+    std::atomic<std::int64_t> invalidSymbol_{0};   // producer thread
+    std::atomic<std::int64_t> listenerErrors_{0};  // consumer thread
     std::thread consumer_;
 };
 
