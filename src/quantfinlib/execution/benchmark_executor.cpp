@@ -184,7 +184,7 @@ std::int64_t BenchmarkExecutor::dueQuantity(double scheduleFraction, const Marke
         if (std::isnan(targetFrac)) {
             targetFrac = f;
         }
-        behind = static_cast<std::int64_t>(std::lround(targetFrac * static_cast<double>(parentQty_))) - committed;
+        behind = static_cast<std::int64_t>(std::llround(targetFrac * static_cast<double>(parentQty_))) - committed;
     }
     if (behind <= 0) {
         return 0;

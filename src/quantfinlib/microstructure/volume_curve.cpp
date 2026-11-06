@@ -38,7 +38,7 @@ void VolumeCurve::rebuildPrefixSums() {
     profileTotal_ = cum;
 }
 
-void VolumeCurve::onVolume(int bucket, long qty) {
+void VolumeCurve::onVolume(int bucket, std::int64_t qty) {
     if (qty > 0) {
         today_[static_cast<std::size_t>(bucket)] += static_cast<double>(qty);
         todayTotal_ += static_cast<double>(qty);

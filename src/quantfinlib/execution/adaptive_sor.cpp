@@ -40,9 +40,9 @@ void AdaptiveSor::registerVenue(const std::string& venue, int scorecardId) {
 
 std::int64_t AdaptiveSor::darkProbeSize(const int* id, std::int64_t quantity) const {
     double learned = id != nullptr ? scorecard_.expectedHiddenShares(*id) : 0;
-    std::int64_t base = learned > 0 ? static_cast<std::int64_t>(std::lround(learned))
+    std::int64_t base = learned > 0 ? static_cast<std::int64_t>(std::llround(learned))
                                     : config_.defaultDarkProbeShares;
-    return std::min(base, static_cast<std::int64_t>(std::lround(config_.maxDarkFraction
+    return std::min(base, static_cast<std::int64_t>(std::llround(config_.maxDarkFraction
                                                                 * static_cast<double>(quantity))));
 }
 

@@ -14,7 +14,7 @@ namespace {
 // left out.
 constexpr int kMaxCents = 500000;
 constexpr int kShadowOrders = 1 << 20;
-constexpr long kNotionalOrder = 100;
+constexpr std::int64_t kNotionalOrder = 100;
 constexpr std::uint8_t kSaleExtendedHours = 0x40;
 constexpr std::uint8_t kSaleSinglePriceCross = 0x08;
 
@@ -143,7 +143,7 @@ void IexReplay::stepQueue(Symbol& s) {
             ++checks_.queueLevelGone;
             q.close();
         } else {
-            q.onLevelResize(static_cast<long>(size) + kNotionalOrder);
+            q.onLevelResize(static_cast<std::int64_t>(size) + kNotionalOrder);
             ++checks_.queueUpdates;
             double ahead = q.sharesAhead();
             double progress = q.queueProgress();
@@ -158,7 +158,7 @@ void IexReplay::stepQueue(Symbol& s) {
         }
     }
     if (!q.active() && s.bbo.bid != 0) {
-        q.join(static_cast<long>(s.bbo.bidSize), kNotionalOrder);
+        q.join(static_cast<std::int64_t>(s.bbo.bidSize), kNotionalOrder);
         s.queuePrice = s.bbo.bid;
         ++checks_.queueJoins;
     }
@@ -329,7 +329,7 @@ void IexReplay::onMessage(const IexMessage& m) {
         case 'T':
             onPrint(s, m);
             if (s.tracked && !s.usesOrders && s.queue.active() && m.price == s.queuePrice) {
-                s.queue.onTrade(static_cast<long>(m.size));
+                s.queue.onTrade(static_cast<std::int64_t>(m.size));
             }
             return;
         case 'B':
