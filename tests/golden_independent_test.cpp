@@ -263,6 +263,11 @@ TEST(negativeRatesPriceOrFailLoudlyNeverNaN) {
                                                                     0.2, 1));
     // Payer minus receiver is annuity * (F - K), negative rates included.
     double a = rates_options::annuity(neg, 1.0, 5.0, 2);
+    double byHand = 0;
+    for (int i = 1; i <= 10; i++) {
+        byHand += 0.5 * neg.discountFactor(1.0 + 0.5 * i);
+    }
+    EXPECT_NEAR(byHand, a, 1e-14);
     double f = rates_options::forwardSwapRate(neg, 1.0, 5.0, 2);
     EXPECT_TRUE(f < 0);
     double k = -0.001;
@@ -304,6 +309,10 @@ TEST(golden_dayCountsAgainstQuantLib) {
         EXPECT_NEAR(x.isda, day_count::yearFraction(DayCount::THIRTY_E_360_ISDA, s, e), 1e-15);
         EXPECT_NEAR(x.actIsda, day_count::yearFraction(DayCount::ACT_ACT_ISDA, s, e), 1e-15);
     }
+    // Bond basis keeps a 31st end date when the start day is below 30:
+    // (60 + 16)/360, as ql.Thirty360 BondBasis.
+    EXPECT_NEAR(76 / 360.0, day_count::yearFraction(DayCount::THIRTY_360, LocalDate::of(2023, 1, 15),
+                                                    LocalDate::of(2023, 3, 31)), 1e-15);
     // February termination date keeps its day number (ql.Thirty360 ISDA).
     LocalDate s = LocalDate::of(2023, 8, 31), feb = LocalDate::of(2024, 2, 29);
     EXPECT_NEAR(0.49722222222222223,
@@ -458,6 +467,8 @@ TEST(zeroVolGreeksAreTheDeterministicLimits) {
     EXPECT_NEAR(-e1, delta(OptionType::PUT, 100, 120, 0.05, 0.01, 0, 1), 1e-15);
     EXPECT_NEAR(0.5, delta(OptionType::CALL, 100, 100, 0, 0, 0, 1), 1e-15);
     EXPECT_NEAR(100 * 0.3989422804014327, vega(100, 100, 0, 0, 0, 1), 1e-12);
+    EXPECT_NEAR(-(0.01 * 100 * e1 - 0.05 * 120 * e5),
+                theta(OptionType::PUT, 100, 120, 0.05, 0.01, 0, 1), 1e-12);
     // Greeks struct: no NaN anywhere at vol = 0.
     Greeks g = greeks(OptionType::CALL, 100, 100, 0, 0, 0, 1);
     EXPECT_TRUE(std::isfinite(g.delta) && std::isfinite(g.gamma) && std::isfinite(g.vega)
@@ -477,6 +488,8 @@ TEST(golden_touchProbabilityNeverOverflows) {
     for (const auto& x : rows) {
         EXPECT_NEAR(x.p, touch_option::hitProbability(x.s, x.h, x.r, x.q, x.v, x.t), 1e-12);
     }
+    // Lower barrier with the drift towards it: exp(2052) overflows, certain hit.
+    EXPECT_NEAR(1.0, touch_option::hitProbability(100, 95, -0.5, 0, 0.005, 1), 1e-12);
     EXPECT_THROWS(touch_option::hitProbability(kNaN, 100, 0, 0, 0.2, 1));
     EXPECT_THROWS(touch_option::hitProbability(100, 90, 0, 0, kNaN, 1));
 }
@@ -595,6 +608,11 @@ TEST(golden_allEightBarriersAgainstQuantLib) {
     double p = barrier_option::price(OptionType::CALL, Direction::UP, Knock::OUT, 100, 90, 130, 0,
                                      0.05, 0, 0.01, 1);
     EXPECT_TRUE(std::isfinite(p));
+    // Forward 105 at 0.5% vol never reaches 130: the knock-out is the vanilla,
+    // though (H/S)^(2 mu) overflows.
+    EXPECT_NEAR(black_scholes::price(OptionType::CALL, 100, 90, 0.05, 0, 0.005, 1),
+                barrier_option::price(OptionType::CALL, Direction::UP, Knock::OUT, 100, 90, 130, 0,
+                                      0.05, 0, 0.005, 1), 1e-9);
 }
 
 // ---------------------------------------------------------------- H13
