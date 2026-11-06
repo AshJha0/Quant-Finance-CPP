@@ -1,6 +1,11 @@
 # Changelog
 
-## 2.0.0 (unreleased)
+## Unreleased
+
+- The language standard is now C++26, so a compiler that accepts `-std=c++26` is required. Only features our compilers support are used; see the README.
+- `std::to_string(double)` now prints the shortest form (`1.1`, not `1.100000`) on current standard libraries. In the library this changes 124 error messages and 6 display strings, such as FX `toString` and the `BOLL_REV` factor name. No FIX output, file format or calculation uses it.
+
+## 2.0.0 (2026-11-06)
 
 Follows the review in `review/2026-11-06/REVIEW_AND_PLAN.md`. This is a breaking release: defaults now fail closed and backtests are more conservative, so results will fall.
 

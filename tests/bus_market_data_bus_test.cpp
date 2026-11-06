@@ -10,6 +10,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <format>
 #include <thread>
 #include <vector>
 
@@ -31,10 +32,10 @@ TEST(perSymbolAndGlobalListenersBothFireInOrder) {
 
     std::vector<std::string> calls;
     bus.subscribe(eur, [&](int, double price, double, std::int64_t) {
-        calls.push_back("sym1:" + std::to_string(price));
+        calls.push_back("sym1:" + std::format("{:.6f}", price));
     });
     bus.subscribe(eur, [&](int, double price, double, std::int64_t) {
-        calls.push_back("sym2:" + std::to_string(price));
+        calls.push_back("sym2:" + std::format("{:.6f}", price));
     });
     bus.subscribeAll([&](int symbolId, double, double, std::int64_t) {
         calls.push_back("all:" + std::to_string(symbolId));
