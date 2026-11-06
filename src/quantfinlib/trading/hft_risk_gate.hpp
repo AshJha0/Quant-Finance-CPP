@@ -36,6 +36,7 @@
 #pragma once
 
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <memory>
@@ -66,6 +67,7 @@ public:
     static constexpr std::uint32_t KILL_AGGREGATOR = 2u;
     static constexpr std::uint32_t KILL_DEAD_MAN = 4u;
     static constexpr std::uint32_t KILL_GATEWAY = 8u;  // overfill, unsolicited fill, adapter fault
+    static constexpr std::uint32_t KILL_VENUE_LINK = 16u;  // venue session lost
 
     /** @throws std::invalid_argument if maxSymbols <= 0 */
     explicit HftRiskGate(int maxSymbols);
@@ -114,7 +116,7 @@ public:
     /** Halts/unhalts a symbol -- callable from any thread. Bad ids are ignored. */
     void halt(int symbolId, bool isHalted) {
         if (validSymbol(symbolId)) {
-            halted_[symbolId].store(isHalted, std::memory_order_release);
+            symbols_[symbolId].halted.store(isHalted, std::memory_order_release);
         }
     }
 
@@ -150,7 +152,7 @@ public:
 
     /** The collar reference for a symbol (NaN = unset or bad id). */
     double referencePrice(int symbolId) const {
-        return validSymbol(symbolId) ? referencePrices_[symbolId].load(std::memory_order_acquire)
+        return validSymbol(symbolId) ? symbols_[symbolId].reference.load(std::memory_order_acquire)
                                      : std::numeric_limits<double>::quiet_NaN();
     }
 
@@ -167,7 +169,7 @@ public:
     /** Drops a reference (stale feed): orders then reject until a new one arrives. */
     void clearReferencePrice(int symbolId) {
         if (validSymbol(symbolId)) {
-            referencePrices_[symbolId].store(std::numeric_limits<double>::quiet_NaN(),
+            symbols_[symbolId].reference.store(std::numeric_limits<double>::quiet_NaN(),
                                              std::memory_order_release);
         }
     }
@@ -212,7 +214,7 @@ public:
             bumpRejection(REJECT_SYMBOL);
             return false;
         }
-        positions_[symbolId].fetch_add(sign(side) * quantity, std::memory_order_acq_rel);
+        symbols_[symbolId].position.fetch_add(sign(side) * quantity, std::memory_order_acq_rel);
         releaseOpen(symbolId, side, released);
         return true;
     }
@@ -226,7 +228,7 @@ public:
 
     /** Live position -- readable from any thread (0 for a bad id). */
     std::int64_t position(int symbolId) const {
-        return validSymbol(symbolId) ? positions_[symbolId].load(std::memory_order_acquire) : 0;
+        return validSymbol(symbolId) ? symbols_[symbolId].position.load(std::memory_order_acquire) : 0;
     }
 
     /** Quantity reserved by working orders on one side (0 for a bad id). */
@@ -234,8 +236,8 @@ public:
         if (!validSymbol(symbolId)) {
             return 0;
         }
-        return (side == Side::BUY ? openBuy_ : openSell_)[symbolId].load(
-                std::memory_order_acquire);
+        const SymbolState& s = symbols_[symbolId];
+        return (side == Side::BUY ? s.openBuy : s.openSell).load(std::memory_order_acquire);
     }
 
     std::int64_t rejectionCount(int reasonCode) const {
@@ -251,13 +253,37 @@ public:
 
     static std::string reasonName(int code);
 
+    /** Where the shared state sits, so a test can pin the padding. */
+    struct Layout {
+        std::size_t symbolStateBytes;
+        std::size_t symbolStateAlign;
+        std::size_t orderToMarketBytes;   // within one symbol's state
+        std::size_t readOnlyHead;         // offsets from the gate object
+        std::size_t rejections;
+        std::size_t kill;
+        std::size_t limits;
+    };
+
+    Layout layout() const;
+
 private:
     static constexpr int kReasons = 12;
+
+    // Two lines per symbol. The first is written by the order flow, and one
+    // miss brings a check all it needs; the second by market data and ops.
+    // Padding also keeps neighbouring symbols from sharing a line.
+    struct alignas(64) SymbolState {
+        std::atomic<std::int64_t> position{0};   // signed
+        std::atomic<std::int64_t> openBuy{0};    // reserved, >= 0
+        std::atomic<std::int64_t> openSell{0};   // reserved, >= 0
+        alignas(64) std::atomic<double> reference{std::numeric_limits<double>::quiet_NaN()};
+        std::atomic<bool> halted{false};
+    };
 
     bool validSymbol(int symbolId) const { return symbolId >= 0 && symbolId < maxSymbols_; }
 
     std::atomic<std::int64_t>& openOf(int symbolId, Side side) {
-        return side == Side::BUY ? openBuy_[symbolId] : openSell_[symbolId];
+        return side == Side::BUY ? symbols_[symbolId].openBuy : symbols_[symbolId].openSell;
     }
 
     /** Every check; position and kill are judged as if delta were already open. */
@@ -276,12 +302,10 @@ private:
     }
 
     const int maxSymbols_;
-    std::unique_ptr<std::atomic<std::int64_t>[]> positions_;   // signed, by symbol id
-    std::unique_ptr<std::atomic<std::int64_t>[]> openBuy_;     // reserved, >= 0
-    std::unique_ptr<std::atomic<std::int64_t>[]> openSell_;    // reserved, >= 0
-    std::unique_ptr<std::atomic<double>[]> referencePrices_;   // NaN = none
-    std::unique_ptr<std::atomic<bool>[]> halted_;
-    std::atomic<std::int64_t> rejections_[kReasons];
+    std::unique_ptr<SymbolState[]> symbols_;   // by symbol id
+    // Counters on their own lines: a storm of rejects must not keep
+    // invalidating the line every check reads the symbol table through.
+    alignas(64) std::atomic<std::int64_t> rejections_[kReasons];
     std::atomic<std::int64_t> badReferences_{0};
     // Kill state on its own cache line: tripped from other threads, read on
     // every check.

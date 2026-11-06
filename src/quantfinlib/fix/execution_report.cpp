@@ -1,5 +1,8 @@
 #include "quantfinlib/fix/execution_report.hpp"
 
+#include <stdexcept>
+#include <string>
+
 namespace quantfinlib {
 
 ExecutionReport ExecutionReport::accepted(const NewOrderSingle& order, const std::string& orderId,
@@ -34,6 +37,21 @@ ExecutionReport ExecutionReport::replaced(const OrderCancelReplaceRequest& reque
 }
 
 ExecutionReport ExecutionReport::fromMessage(const FixMessage& m) {
+    // None of these sit in a group here. A second copy means two readers of
+    // the same bytes could disagree about the fill.
+    for (int tag : {FixMessage::CL_ORD_ID, FixMessage::CUM_QTY, FixMessage::EXEC_ID,
+                    FixMessage::EXEC_TYPE, FixMessage::LAST_PX, FixMessage::LAST_QTY,
+                    FixMessage::LEAVES_QTY, FixMessage::ORD_STATUS, FixMessage::ORDER_ID,
+                    FixMessage::SIDE, FixMessage::SYMBOL}) {
+        if (m.count(tag) > 1) {
+            throw std::invalid_argument("repeated tag " + std::to_string(tag)
+                                        + " in ExecutionReport");
+        }
+    }
+    char side = m.getChar(FixMessage::SIDE);
+    if (side != '1' && side != '2') {
+        throw std::invalid_argument("ExecutionReport side is neither buy nor sell");
+    }
     return ExecutionReport{
             m.getString(FixMessage::ORDER_ID),
             m.getString(FixMessage::EXEC_ID),
@@ -41,7 +59,7 @@ ExecutionReport ExecutionReport::fromMessage(const FixMessage& m) {
             m.getChar(FixMessage::ORD_STATUS),
             m.getString(FixMessage::CL_ORD_ID, ""),
             m.getString(FixMessage::SYMBOL),
-            m.getChar(FixMessage::SIDE) == '1' ? Side::BUY : Side::SELL,
+            side == '1' ? Side::BUY : Side::SELL,
             m.getDouble(FixMessage::LAST_QTY, 0),
             m.getDouble(FixMessage::LAST_PX, 0),
             m.getDouble(FixMessage::CUM_QTY, 0),

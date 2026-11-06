@@ -1,12 +1,14 @@
 // Port of com.quantfinlib.trading.OrderRingBuffer (Java): zero-allocation
 // single-producer / single-consumer ring buffer for order messages -- the
 // order-entry mirror of the market-data TickRingBuffer: preallocated
-// primitive slots, cache-line-padded (alignas(64)) sequences,
+// slots of exactly one cache line each, so a message costs one line where
+// parallel arrays cost six, cache-line-padded (alignas(64)) sequences,
 // acquire/release publication, and producer/consumer sequence caching.
 #pragma once
 
 #include <algorithm>
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <vector>
 
@@ -20,14 +22,7 @@ public:
     explicit OrderRingBuffer(int requestedCapacity)
             : capacity_(roundCapacity(requestedCapacity)),
               mask_(capacity_ - 1),
-              orderIds_(capacity_),
-              symbolIds_(capacity_),
-              sides_(capacity_),
-              quantities_(capacity_),
-              prices_(capacity_),
-              timestamps_(capacity_),
-              types_(capacity_),
-              refIds_(capacity_) {}
+              slots_(static_cast<std::size_t>(capacity_)) {}
 
     /** Producer side (trading thread). Returns false when full. */
     bool publish(std::int64_t orderId, int symbolId, Side side, std::int64_t quantity,
@@ -50,15 +45,15 @@ public:
                 return false;
             }
         }
-        int i = static_cast<int>(t & mask_);
-        orderIds_[i] = orderId;
-        symbolIds_[i] = symbolId;
-        sides_[i] = static_cast<std::uint8_t>(side == Side::BUY ? 0 : 1);
-        quantities_[i] = quantity;
-        prices_[i] = price;
-        timestamps_[i] = timestampNanos;
-        types_[i] = type;
-        refIds_[i] = refId;
+        Slot& s = slots_[static_cast<std::size_t>(t & mask_)];
+        s.orderId = orderId;
+        s.refId = refId;
+        s.quantity = quantity;
+        s.price = price;
+        s.timestampNanos = timestampNanos;
+        s.symbolId = symbolId;
+        s.side = side;
+        s.type = type;
         tail_.store(t + 1, std::memory_order_release);
         return true;
     }
@@ -90,9 +85,9 @@ public:
         }
         int n = static_cast<int>(std::min<std::int64_t>(cachedTail_ - h, limit));
         for (int k = 0; k < n; k++) {
-            int i = static_cast<int>(h & mask_);
-            sink(types_[i], orderIds_[i], refIds_[i], symbolIds_[i], sides_[i] == 0 ? Side::BUY : Side::SELL,
-                 quantities_[i], prices_[i], timestamps_[i]);
+            const Slot& s = slots_[static_cast<std::size_t>(h & mask_)];
+            sink(s.type, s.orderId, s.refId, s.symbolId, s.side, s.quantity, s.price,
+                 s.timestampNanos);
             h++;
         }
         head_.store(h, std::memory_order_release);
@@ -105,7 +100,27 @@ public:
 
     int capacity() const { return capacity_; }
 
+    /** Bytes per slot; one cache line. */
+    static constexpr std::size_t slotBytes() { return 64; }
+
+    /** Distance of slot 0 from a 64-byte boundary. */
+    std::size_t slotMisalignment() const {
+        return reinterpret_cast<std::uintptr_t>(slots_.data()) % 64;
+    }
+
 private:
+    struct alignas(64) Slot {
+        std::int64_t orderId;
+        std::int64_t refId;
+        std::int64_t quantity;
+        double price;
+        std::int64_t timestampNanos;
+        int symbolId;
+        Side side;
+        std::uint8_t type;
+    };
+    static_assert(sizeof(Slot) == 64, "one message, one cache line");
+
     // Java: Integer.highestOneBit(Math.max(2, requestedCapacity - 1)) * 2.
     static int roundCapacity(int requested) {
         unsigned v = static_cast<unsigned>(requested - 1 > 2 ? requested - 1 : 2);
@@ -115,14 +130,7 @@ private:
 
     const int capacity_;
     const int mask_;
-    std::vector<std::int64_t> orderIds_;
-    std::vector<int> symbolIds_;
-    std::vector<std::uint8_t> sides_;
-    std::vector<std::int64_t> quantities_;
-    std::vector<double> prices_;
-    std::vector<std::int64_t> timestamps_;
-    std::vector<std::uint8_t> types_;
-    std::vector<std::int64_t> refIds_;
+    std::vector<Slot> slots_;
 
     // Padded sequences and per-side caches, one cache line each -- same
     // reasoning as TickRingBuffer: the trading thread stores cachedHead

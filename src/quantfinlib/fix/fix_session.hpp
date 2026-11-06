@@ -58,6 +58,7 @@
 #include "quantfinlib/fix/fix_message.hpp"
 #include "quantfinlib/fix/fix_session_store.hpp"
 #include "quantfinlib/fix/new_order_single.hpp"
+#include "quantfinlib/fix/order_cancel_reject.hpp"
 #include "quantfinlib/fix/order_cancel_replace_request.hpp"
 #include "quantfinlib/fix/order_cancel_request.hpp"
 #include "quantfinlib/orderbook/side.hpp"
@@ -173,6 +174,24 @@ public:
             (void)request;
         }
 
+        virtual void onOrderCancelReject(FixSession& session, const OrderCancelReject& reject) {
+            (void)session;
+            (void)reject;
+        }
+
+        /**
+         * An application message could not be read, or a callback for it
+         * threw. The session answers with a Reject and moves past the
+         * sequence number, so this is the only sign left that, say, a fill
+         * was lost. A trading listener must treat it as a fault.
+         */
+        virtual void onApplicationFault(FixSession& session, const FixMessage& message,
+                                        const std::string& reason) {
+            (void)session;
+            (void)message;
+            (void)reason;
+        }
+
         /** Session-level Reject (35=3) received from the peer. */
         virtual void onReject(FixSession& session, std::int64_t refSeqNum,
                               const std::string& text) {
@@ -253,6 +272,9 @@ public:
                                         std::int64_t quantity, double limitPrice,
                                         char timeInForce);
 
+    /** Venue side: refuses a cancel or replace (35=9). */
+    void sendOrderCancelReject(const OrderCancelReject& reject);
+
     /** Sends a session-level Reject (35=3) referring to an inbound message. */
     void sendReject(std::int64_t refSeqNum, const std::string& text);
 
@@ -296,7 +318,8 @@ private:
                       const std::optional<std::string>& origSendingTime);
     void readerLoop();
     void handle(const FixMessage& m);
-    void dispatchApp(std::int64_t seq, const std::function<void()>& dispatch);
+    void dispatchApp(const FixMessage& m, std::int64_t seq,
+                     const std::function<void()>& dispatch);
     void dispatch(const FixMessage& m, std::int64_t seq, bool resetApplied);
     void handleSequenceReset(const FixMessage& m, std::int64_t seq);
     void applyLogonSeqReset();
