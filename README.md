@@ -28,13 +28,13 @@ Each claim has a way to check it.
 
 ## Latency
 
-Indicative only: WSL2, unpinned, Intel Core 5 120U, GCC 15. Run `ull_bench` to reproduce it on your machine. Tails here measure the host, not the code.
+Indicative only: C++26 build, median of three runs, WSL2, unpinned, Intel Core 5 120U, GCC 15. Run `ull_bench` to reproduce it on your machine. Tails here measure the host, not the code.
 
 | Stage | p50 |
 |---|---|
-| Book add / cancel, 16k resting | 35 / 43 ns |
+| Book add / cancel, 16k resting | 35 / 45 ns |
 | Book add / cancel, 1M resting | 132 / 264 ns |
-| Ring hand-off, busy-spin | 132 ns |
+| Ring hand-off, busy-spin | 126 ns |
 | Bus publish to listener, busy-spin | 148 ns |
 | Single-thread code path, no I/O or core hop | 43 ns |
 
