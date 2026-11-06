@@ -93,7 +93,7 @@ Result run(const AlphaContext& ctx, const AlphaFactor& factor, const Config& con
     for (int t = 0; t < n; t++) {
         timestamps[static_cast<std::size_t>(t)] = ctx.timestamp(t);
     }
-    const auto actions = corporate_actions::schedule(ctx.symbols(), timestamps, ctx.universe(),
+    const auto actions = corporate_actions::schedule(ctx.symbols(), timestamps, ctx.universeForEngine(),
                                                      config.delistings, config.mergers);
     constexpr int NO_EVENT = -2;  // matches no bar, nor the schedule's -1 for "none"
     std::vector<char> volumeKnown(static_cast<std::size_t>(m), 0);

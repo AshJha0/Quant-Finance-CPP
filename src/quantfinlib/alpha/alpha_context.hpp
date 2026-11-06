@@ -63,8 +63,11 @@ public:
     /** Latest fundamentals public at barIndex, or nullptr when none are. */
     const Fundamentals* fundamentalsAsOf(int i, int barIndex) const;
 
-    /** The attached universe, or nullptr. */
-    const PointInTimeUniverse* universe() const { return universe_.get(); }
+    /**
+     * The attached universe, or nullptr. For engines only: it holds terminal
+     * events dated in the future, so a factor reading it would look ahead.
+     */
+    const PointInTimeUniverse* universeForEngine() const { return universe_.get(); }
 
     /** Bar timestamp at index (taken from the first series). */
     std::int64_t timestamp(int index) const { return series_[0].timestamp(index); }
