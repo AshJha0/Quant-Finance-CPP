@@ -46,6 +46,21 @@ public:
         return *this;
     }
 
+    /**
+     * Checked wrap for wire bytes: `available` bytes follow `offset`. Returns
+     * false, leaving the flyweight untouched, unless a whole message of this
+     * type with valid enum bytes is there.
+     */
+    bool wrap(unsigned char* buffer, int offset, int available) {
+        if (buffer == nullptr || offset < 0 || available < BLOCK_LENGTH
+            || sbe_wire::getI32(buffer, offset + TYPE_OFFSET) != MESSAGE_TYPE) {
+            return false;
+        }
+        buffer_ = buffer;
+        offset_ = offset;
+        return true;
+    }
+
     /** Encodes a full quote message at the wrap position (writes the type header). */
     QuoteFlyweight& encode(int symbolId, double bidPrice, double bidSize, double askPrice,
                            double askSize, std::int64_t timestampNanos) {

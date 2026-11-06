@@ -1,6 +1,7 @@
 #include "quantfinlib/fix/fix_session.hpp"
 
 #include <algorithm>
+#include <cerrno>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -24,6 +25,12 @@ constexpr native_socket_t kInvalidSocket = INVALID_SOCKET;
 #include <unistd.h>
 using native_socket_t = int;
 constexpr native_socket_t kInvalidSocket = -1;
+#endif
+
+// A peer FIN must surface as a send error, never as SIGPIPE killing the
+// process. macOS has no MSG_NOSIGNAL and uses SO_NOSIGPIPE instead.
+#ifndef MSG_NOSIGNAL
+#define MSG_NOSIGNAL 0
 #endif
 
 namespace quantfinlib {
@@ -98,16 +105,77 @@ native_socket_t connectTo(const std::string& host, int port) {
     return sock;
 }
 
-void writeBytes(native_socket_t sock, const std::vector<std::uint8_t>& payload) {
+void configureSocket(native_socket_t s, int sendTimeoutMillis) {
+#ifdef _WIN32
+    DWORD timeout = static_cast<DWORD>(sendTimeoutMillis);
+#else
+    timeval timeout{};
+    timeout.tv_sec = sendTimeoutMillis / 1000;
+    timeout.tv_usec = (sendTimeoutMillis % 1000) * 1000;
+#endif
+    ::setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&timeout),
+                 sizeof(timeout));
+#ifdef SO_NOSIGPIPE
+    int on = 1;
+    ::setsockopt(s, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof(on));
+#endif
+}
+
+/**
+ * SO_SNDTIMEO bounds each blocked send call; the deadline bounds the whole
+ * frame against a peer that drains a few bytes at a time. A timeout leaves a
+ * partial frame on the wire, so the caller must treat it as fatal.
+ */
+void writeBytes(native_socket_t sock, const std::vector<std::uint8_t>& payload,
+                int timeoutMillis) {
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMillis);
     std::size_t sent = 0;
     while (sent < payload.size()) {
         int n = ::send(sock, reinterpret_cast<const char*>(payload.data() + sent),
-                       static_cast<int>(payload.size() - sent), 0);
+                       static_cast<int>(payload.size() - sent), MSG_NOSIGNAL);
         if (n <= 0) {
-            throw std::runtime_error("socket send failed");
+#ifndef _WIN32
+            if (n < 0 && errno == EINTR) {
+                continue;
+            }
+#endif
+            throw std::runtime_error("socket send failed or timed out");
         }
         sent += static_cast<std::size_t>(n);
+        if (sent < payload.size() && std::chrono::steady_clock::now() >= deadline) {
+            throw std::runtime_error("socket send timed out");
+        }
     }
+}
+
+/** "YYYYMMDD-HH:MM:SS[.sss]" as seconds since the epoch; nullopt if malformed. */
+std::optional<std::int64_t> parseUtcSeconds(const std::string& t) {
+    if (t.size() < 17 || t[8] != '-' || t[11] != ':' || t[14] != ':') {
+        return std::nullopt;
+    }
+    auto number = [&t](std::size_t from, std::size_t count, int& out) {
+        out = 0;
+        for (std::size_t i = from; i < from + count; ++i) {
+            if (t[i] < '0' || t[i] > '9') {
+                return false;
+            }
+            out = out * 10 + (t[i] - '0');
+        }
+        return true;
+    };
+    int year = 0, month = 0, day = 0, hour = 0, minute = 0, second = 0;
+    if (!number(0, 4, year) || !number(4, 2, month) || !number(6, 2, day) || !number(9, 2, hour)
+        || !number(12, 2, minute) || !number(15, 2, second)) {
+        return std::nullopt;
+    }
+    using namespace std::chrono;
+    year_month_day ymd{std::chrono::year(year), std::chrono::month(static_cast<unsigned>(month)),
+                       std::chrono::day(static_cast<unsigned>(day))};
+    if (!ymd.ok() || hour > 23 || minute > 59 || second > 60) {
+        return std::nullopt;
+    }
+    return sys_days(ymd).time_since_epoch().count() * 86400LL + hour * 3600LL + minute * 60LL
+           + second;
 }
 
 bool isAdminType(const std::string& type) {
@@ -124,6 +192,10 @@ std::int64_t nowNanos() {
 }
 
 constexpr int ESTABLISH_TIMEOUT_SECONDS = 10;
+// Enough for any Logon; the full frame limit applies once a peer is logged on.
+constexpr std::int64_t PRE_LOGON_MAX_BODY = 4096;
+// Isolated line noise is ignored; a stream of it is not a live FIX peer.
+constexpr int MAX_CONSECUTIVE_GARBLED = 16;
 
 }  // namespace
 
@@ -162,9 +234,12 @@ FixServerSocket::~FixServerSocket() {
 }
 
 void FixServerSocket::close() {
-    if (fd_ != fromNative(kInvalidSocket)) {
-        closeNative(toNative(fd_));
-        fd_ = fromNative(kInvalidSocket);
+    std::intptr_t fd = fd_.exchange(fromNative(kInvalidSocket));
+    if (fd != fromNative(kInvalidSocket)) {
+#ifndef _WIN32
+        ::shutdown(toNative(fd), SHUT_RDWR);  // wakes a thread blocked in accept
+#endif
+        closeNative(toNative(fd));
     }
 }
 
@@ -196,6 +271,30 @@ FixSession::Config FixSession::Config::withResetOnLogon() const {
     return c;
 }
 
+FixSession::Config FixSession::Config::withSendTimeout(int millis) const {
+    if (millis < 1) {
+        throw std::invalid_argument("send timeout must be >= 1ms");
+    }
+    Config c = *this;
+    c.sendTimeoutMillis = millis;
+    return c;
+}
+
+FixSession::Config FixSession::Config::withMaxOrderReplayAge(int seconds) const {
+    if (seconds < 0) {
+        throw std::invalid_argument("replay age must be >= 0");
+    }
+    Config c = *this;
+    c.maxOrderReplayAgeSeconds = seconds;
+    return c;
+}
+
+FixSession::Config FixSession::Config::withSequenceResetMode() const {
+    Config c = *this;
+    c.allowSequenceResetMode = true;
+    return c;
+}
+
 // ------------------------------------------------------------------
 // Construction / establishment
 // ------------------------------------------------------------------
@@ -208,15 +307,16 @@ FixSession::FixSession(std::intptr_t socket, Config config, Listener& listener, 
           acceptor_(acceptor),
           store_(std::move(store)),
           sentResetLogon_(!acceptor && config_.resetOnLogon) {
+    configureSocket(toNative(socket_), config_.sendTimeoutMillis);
+    decoder_.setMaxBodyLength(PRE_LOGON_MAX_BODY);
     lastSentNanos_.store(nowNanos());
     lastReceivedNanos_.store(nowNanos());
     // An initiator configured for reset-on-logon starts BOTH counters at 1
     // before any thread runs (its Logon goes out as 34=1, 141=Y) and
     // persists the reset so a crash mid-handshake cannot resurrect the
-    // abandoned numbers.
+    // abandoned numbers or their stored messages.
     if (sentResetLogon_) {
-        store_->saveOutgoingSeq(1);
-        store_->saveIncomingSeq(1);
+        store_->reset();
     }
     outgoingSeq_ = store_->nextOutgoingSeq();
     expectedIncomingSeq_.store(store_->expectedIncomingSeq());
@@ -229,6 +329,11 @@ FixSession::~FixSession() {
     }
     if (heartbeatThread_.joinable()) {
         heartbeatThread_.join();
+    }
+    // Only now can nothing be using the descriptor or the store.
+    closeNative(toNative(socket_));
+    if (auto* fileStore = dynamic_cast<FileSessionStore*>(store_.get())) {
+        fileStore->close();
     }
 }
 
@@ -273,7 +378,7 @@ std::unique_ptr<FixSession> FixSession::accept(FixServerSocket& server, const Co
                                                Listener& listener,
                                                std::shared_ptr<FixSessionStore> store) {
     ensureSocketsInitialized();
-    native_socket_t client = ::accept(toNative(server.fd_), nullptr, nullptr);
+    native_socket_t client = ::accept(toNative(server.fd_.load()), nullptr, nullptr);
     if (client == kInvalidSocket) {
         throw std::runtime_error("FIX server accept failed");
     }
@@ -290,6 +395,10 @@ void FixSession::awaitEstablished() {
     if (!awaitLogon(ESTABLISH_TIMEOUT_SECONDS)) {
         close();
         throw std::runtime_error("FIX logon timed out after " + std::to_string(ESTABLISH_TIMEOUT_SECONDS) + "s");
+    }
+    std::lock_guard<std::mutex> lock(logonMutex_);
+    if (!logonSucceeded_) {
+        throw std::runtime_error("FIX logon failed: " + failureReason_);
     }
 }
 
@@ -419,29 +528,64 @@ void FixSession::logout() {
 void FixSession::close() {
     running_.store(false);
     established_.store(false);
-    closeNative(toNative(socket_));
-    if (auto* fileStore = dynamic_cast<FileSessionStore*>(store_.get())) {
-        fileStore->close();
+    shutdownSocket();
+    {
+        std::lock_guard<std::mutex> lock(stopMutex_);
     }
+    stopCv_.notify_all();
+}
+
+void FixSession::shutdownSocket() {
+    if (socketShutdown_.exchange(true)) {
+        return;
+    }
+    // shutdown, not close: the reader may be inside recv on this descriptor,
+    // and a closed number can be reused by another thread's open.
+#ifdef _WIN32
+    ::shutdown(toNative(socket_), SD_BOTH);
+#else
+    ::shutdown(toNative(socket_), SHUT_RDWR);
+#endif
 }
 
 // ------------------------------------------------------------------
 // Session machinery
 // ------------------------------------------------------------------
 
+void FixSession::sendLocked(const FixMessage::Builder& builder) {
+    std::int64_t seq = outgoingSeq_++;
+    std::string sendingTime = utcTimestampNow();
+    if (!isAdminType(builder.msgType())) {
+        store_->storeMessage(seq, FixSessionStore::StoredMessage{builder.msgType(), builder.body(),
+                                                                  sendingTime});
+    }
+    store_->saveOutgoingSeq(outgoingSeq_);
+    writeBytes(toNative(socket_),
+               builder.encode(config_.senderCompId, config_.targetCompId, seq, sendingTime),
+               config_.sendTimeoutMillis);
+    lastSentNanos_.store(nowNanos());
+}
+
 void FixSession::send(FixMessage::Builder builder) {
+    if (!running_.load()) {
+        return;
+    }
     try {
         std::lock_guard<std::recursive_mutex> lock(writeMutex_);
-        std::int64_t seq = outgoingSeq_++;
-        std::string sendingTime = utcTimestampNow();
-        if (!isAdminType(builder.msgType())) {
-            store_->storeMessage(seq, FixSessionStore::StoredMessage{builder.msgType(),
-                                                                      builder.body(), sendingTime});
+        sendLocked(builder);
+    } catch (const std::exception& e) {
+        disconnect(std::string("send failed: ") + e.what());
+    }
+}
+
+void FixSession::trySend(const FixMessage::Builder& builder) {
+    try {
+        std::unique_lock<std::recursive_mutex> lock(writeMutex_, std::try_to_lock);
+        if (lock.owns_lock()) {
+            sendLocked(builder);
         }
-        store_->saveOutgoingSeq(outgoingSeq_);
-        writeBytes(toNative(socket_),
-                   builder.encode(config_.senderCompId, config_.targetCompId, seq, sendingTime));
-        lastSentNanos_.store(nowNanos());
+        // Lock held: another send is in flight, which is traffic in itself
+        // and is bounded by the send timeout.
     } catch (const std::exception& e) {
         disconnect(std::string("send failed: ") + e.what());
     }
@@ -452,7 +596,8 @@ void FixSession::writeReplay(const FixMessage::Builder& builder, std::int64_t se
     std::lock_guard<std::recursive_mutex> lock(writeMutex_);
     writeBytes(toNative(socket_),
                builder.encode(config_.senderCompId, config_.targetCompId, seqNum,
-                              utcTimestampNow(), true, origSendingTime));
+                              utcTimestampNow(), true, origSendingTime),
+               config_.sendTimeoutMillis);
     lastSentNanos_.store(nowNanos());
 }
 
@@ -463,25 +608,40 @@ void FixSession::forceOutgoingSeq(std::int64_t seqNum) {
 
 void FixSession::readerLoop() {
     std::vector<std::uint8_t> chunk(4096);
+    int garbled = 0;
     try {
         while (running_.load()) {
             int n = ::recv(toNative(socket_), reinterpret_cast<char*>(chunk.data()),
                           static_cast<int>(chunk.size()), 0);
-            if (n == 0) {
-                disconnect("peer closed connection");
-                return;
-            }
-            if (n < 0) {
+            if (n <= 0) {
                 if (running_.load()) {
-                    disconnect("read failed");
+                    disconnect(n == 0 ? "peer closed connection" : "read failed");
                 }
                 return;
             }
-            lastReceivedNanos_.store(nowNanos());
-            testRequestPending_.store(false);
             decoder_.feed(chunk.data(), 0, static_cast<std::size_t>(n));
-            std::optional<FixMessage> message;
-            while ((message = decoder_.poll()).has_value()) {
+            while (running_.load()) {
+                std::optional<FixMessage> message;
+                try {
+                    message = decoder_.poll();
+                } catch (const std::invalid_argument& e) {
+                    // The frame was consumed but failed its checksum or body
+                    // length. The spec says ignore it: the next good message
+                    // reads as a gap and recovers it. Before Logon there is
+                    // no session worth protecting.
+                    if (!established_.load() || ++garbled > MAX_CONSECUTIVE_GARBLED) {
+                        disconnect(std::string("garbled message: ") + e.what());
+                        return;
+                    }
+                    continue;
+                }
+                if (!message.has_value()) {
+                    break;
+                }
+                garbled = 0;
+                // Only valid frames count as life: a peer dribbling junk
+                // must not keep the watchdog quiet.
+                lastReceivedNanos_.store(nowNanos());
                 handle(*message);
             }
         }
@@ -492,13 +652,72 @@ void FixSession::readerLoop() {
     }
 }
 
+void FixSession::protocolFailure(const std::string& reason) {
+    // Never answer a peer that has not logged on: it would burn a sequence
+    // number on behalf of an unknown counterparty.
+    if (established_.load()) {
+        logoutSent_.store(true);
+        send(FixMessage::builder(FixMessage::LOGOUT).field(FixMessage::TEXT, reason));
+    }
+    disconnect(reason);
+}
+
+void FixSession::tooLow(std::int64_t expected, std::int64_t seq) {
+    protocolFailure("MsgSeqNum too low: expected " + std::to_string(expected) + " got "
+                    + std::to_string(seq) + " without PossDupFlag");
+}
+
+void FixSession::requestResend(std::int64_t expected, std::int64_t received) {
+    listener_.onSequenceGap(expected, received);
+    resendTriggerSeq_ = std::max(resendTriggerSeq_, received);
+    gapFillWindow_ = true;
+    if (!resendPending_) {
+        resendPending_ = true;
+        send(FixMessage::builder(FixMessage::RESEND_REQUEST)
+                     .field(FixMessage::BEGIN_SEQ_NO, expected)
+                     .field(FixMessage::END_SEQ_NO, static_cast<std::int64_t>(0)));
+    }
+}
+
 void FixSession::handle(const FixMessage& m) {
+    if (!m.has(FixMessage::MSG_TYPE) || !m.has(FixMessage::MSG_SEQ_NUM)
+        || !m.has(FixMessage::SENDER_COMP_ID) || !m.has(FixMessage::TARGET_COMP_ID)) {
+        protocolFailure("required header field missing");
+        return;
+    }
     std::int64_t seq = m.getLong(FixMessage::MSG_SEQ_NUM);
     const std::string& type = m.msgType();
+    if (seq < 1) {
+        protocolFailure("MsgSeqNum must be positive");
+        return;
+    }
+    // Their sender is our target and vice versa. Checked before anything
+    // else acts on the message, sequence state included.
+    if (m.getString(FixMessage::SENDER_COMP_ID) != config_.targetCompId
+        || m.getString(FixMessage::TARGET_COMP_ID) != config_.senderCompId) {
+        protocolFailure("CompID problem");
+        return;
+    }
+    const bool possDup = m.getString(FixMessage::POSS_DUP_FLAG, "N") == "Y";
+    if (established_.load()) {
+        if (type == FixMessage::LOGON) {
+            protocolFailure("Logon received on an established session");
+            return;
+        }
+    } else {
+        if (type != FixMessage::LOGON) {
+            protocolFailure("first message must be Logon");
+            return;
+        }
+        if (acceptor_ && !listener_.authenticateLogon(m)) {
+            protocolFailure("Logon refused");
+            return;
+        }
+    }
 
     // SequenceReset carries sequencing semantics itself; handle before validation.
     if (type == FixMessage::SEQUENCE_RESET) {
-        handleSequenceReset(m);
+        handleSequenceReset(m, seq);
         return;
     }
     // Logon with ResetSeqNumFlag(141)=Y -- which the spec requires to carry
@@ -506,23 +725,21 @@ void FixSession::handle(const FixMessage& m) {
     // whole point is that the peer's fresh seq 1 would otherwise read as
     // "too low" against a durable store and disconnect the session the
     // flag exists to save.
-    if (type == FixMessage::LOGON && seq == 1
-        && m.getString(FixMessage::RESET_SEQ_NUM_FLAG, "N") == "Y"
-        && m.getString(FixMessage::POSS_DUP_FLAG, "N") != "Y") {
+    bool resetApplied = false;
+    if (type == FixMessage::LOGON && m.getString(FixMessage::RESET_SEQ_NUM_FLAG, "N") == "Y") {
+        if (seq != 1 || possDup) {
+            protocolFailure("ResetSeqNumFlag requires MsgSeqNum 1 without PossDupFlag");
+            return;
+        }
         applyLogonSeqReset();
+        resetApplied = true;
     }
 
     std::int64_t expected = expectedIncomingSeq_.load();
+    bool inSequence = false;
     if (seq > expected) {
         // Gap: ask for a resend and drop this message -- it will be redelivered.
-        listener_.onSequenceGap(expected, seq);
-        resendTriggerSeq_ = std::max(resendTriggerSeq_, seq);
-        if (!resendPending_) {
-            resendPending_ = true;
-            send(FixMessage::builder(FixMessage::RESEND_REQUEST)
-                         .field(FixMessage::BEGIN_SEQ_NO, expected)
-                         .field(FixMessage::END_SEQ_NO, static_cast<std::int64_t>(0)));
-        }
+        requestResend(expected, seq);
         // Session-critical messages still act despite the gap -- including a
         // peer's own RESEND_REQUEST, so gap recovery on both sides can
         // proceed concurrently instead of one side stalling the other's.
@@ -531,38 +748,73 @@ void FixSession::handle(const FixMessage& m) {
             return;
         }
     } else if (seq < expected) {
-        if (m.getString(FixMessage::POSS_DUP_FLAG, "N") == "Y") {
+        if (possDup && established_.load()) {
             return;  // duplicate from a resend overlap: suppress silently
         }
-        disconnect("MsgSeqNum too low: expected " + std::to_string(expected) + " got "
-                   + std::to_string(seq) + " without PossDupFlag");
+        tooLow(expected, seq);
         return;
     } else {
-        advanceIncoming(seq + 1);
+        inSequence = true;
+        if (!possDup) {
+            gapFillWindow_ = false;  // live traffic: any resend reply has finished
+        }
+        expectedIncomingSeq_.store(seq + 1);
+        if (resendPending_ && seq + 1 > resendTriggerSeq_) {
+            resendPending_ = false;  // gap fully recovered
+        }
     }
 
-    if (type == FixMessage::LOGON) {
+    try {
+        dispatch(m, seq, resetApplied);
+    } catch (const std::invalid_argument& e) {
+        // Well-sequenced but a field is bad: a session Reject, not a disconnect.
         if (!established_.load()) {
-            if (acceptor_) {
-                FixMessage::Builder reply =
-                        FixMessage::builder(FixMessage::LOGON)
-                                .field(FixMessage::ENCRYPT_METHOD, std::string("0"))
-                                .field(FixMessage::HEART_BT_INT,
-                                       static_cast<std::int64_t>(config_.heartbeatSeconds));
-                if (m.getString(FixMessage::RESET_SEQ_NUM_FLAG, "N") == "Y") {
-                    // Confirm the reset: our reply is the peer's proof that
-                    // its 141=Y was honored, sent as 34=1.
-                    reply.field(FixMessage::RESET_SEQ_NUM_FLAG, std::string("Y"));
-                }
-                send(reply);
-            }
-            established_.store(true);
-            countDownLogon();
-            // Raw message too, so acceptors can inspect Username/Password (553/554).
-            listener_.onMessage(*this, m);
-            listener_.onLogon(*this);
+            throw;
         }
+        sendReject(seq, e.what());
+    }
+    // Persist only after the application has the message. A crash in
+    // between re-requests it; the reverse order would lose a fill for good.
+    if (inSequence) {
+        store_->saveIncomingSeq(seq + 1);
+    }
+}
+
+void FixSession::dispatch(const FixMessage& m, std::int64_t seq, bool resetApplied) {
+    const std::string& type = m.msgType();
+    if (type == FixMessage::LOGON) {
+        if (m.getLong(FixMessage::HEART_BT_INT) < 1) {
+            throw std::invalid_argument("HeartBtInt must be positive");
+        }
+        if (acceptor_) {
+            FixMessage::Builder reply =
+                    FixMessage::builder(FixMessage::LOGON)
+                            .field(FixMessage::ENCRYPT_METHOD, std::string("0"))
+                            .field(FixMessage::HEART_BT_INT,
+                                   static_cast<std::int64_t>(config_.heartbeatSeconds));
+            if (resetApplied) {
+                // Confirm the reset: our reply is the peer's proof that
+                // its 141=Y was honored, sent as 34=1.
+                reply.field(FixMessage::RESET_SEQ_NUM_FLAG, std::string("Y"));
+            }
+            send(reply);
+        }
+        decoder_.setMaxBodyLength(FixDecoder::MAX_BODY_LENGTH);
+        established_.store(true);
+        {
+            std::lock_guard<std::mutex> lock(logonMutex_);
+            logonSucceeded_ = true;
+        }
+        countDownLogon();
+        // Raw message too, so acceptors can inspect Username/Password (553/554).
+        listener_.onMessage(*this, m);
+        listener_.onLogon(*this);
     } else if (type == FixMessage::HEARTBEAT) {
+        if (testRequestPending_.load()
+            && m.getString(FixMessage::TEST_REQ_ID, "")
+                       == "probe-" + std::to_string(testRequestId_.load())) {
+            testRequestPending_.store(false);
+        }
         listener_.onMessage(*this, m);
     } else if (type == FixMessage::TEST_REQUEST) {
         FixMessage::Builder reply = FixMessage::builder(FixMessage::HEARTBEAT);
@@ -578,10 +830,9 @@ void FixSession::handle(const FixMessage& m) {
         established_.store(false);
         countDownLogout();
         listener_.onLogout(*this);
-        running_.store(false);
-        closeNative(toNative(socket_));
+        close();
     } else if (type == FixMessage::RESEND_REQUEST) {
-        handleResendRequest(m);
+        handleResendRequest(m, seq);
     } else if (type == FixMessage::REJECT) {
         listener_.onReject(*this, m.has(FixMessage::REF_SEQ_NUM) ? m.getLong(FixMessage::REF_SEQ_NUM) : 0,
                            m.getString(FixMessage::TEXT, ""));
@@ -613,24 +864,77 @@ void FixSession::dispatchApp(std::int64_t seq, const std::function<void()>& disp
     }
 }
 
-void FixSession::handleSequenceReset(const FixMessage& m) {
-    std::int64_t newSeqNo = m.getLong(FixMessage::NEW_SEQ_NO);
-    if (newSeqNo > expectedIncomingSeq_.load()) {
-        advanceIncoming(newSeqNo);
+void FixSession::handleSequenceReset(const FixMessage& m, std::int64_t seq) {
+    std::int64_t expected = expectedIncomingSeq_.load();
+    const bool gapFill = m.getString(FixMessage::GAP_FILL_FLAG, "N") == "Y";
+    const bool possDup = m.getString(FixMessage::POSS_DUP_FLAG, "N") == "Y";
+
+    if (!gapFill) {
+        // Reset mode ignores MsgSeqNum by definition, which makes it a way to
+        // skip fills with no record, so it needs an explicit opt-in.
+        if (!config_.allowSequenceResetMode) {
+            sendReject(seq, "SequenceReset-Reset not accepted");
+            return;
+        }
+        std::int64_t newSeqNo = 0;
+        try {
+            newSeqNo = m.getLong(FixMessage::NEW_SEQ_NO);
+        } catch (const std::invalid_argument& e) {
+            sendReject(seq, e.what());
+            return;
+        }
+        if (newSeqNo < expected) {
+            sendReject(seq, "attempt to lower sequence number");
+        } else if (newSeqNo > expected) {
+            listener_.onSequenceGap(expected, newSeqNo);
+            advanceIncoming(newSeqNo);
+        }
+        return;
     }
-    // Stale resets (PossDup replays of old gap-fills) are ignored.
+
+    // GapFill stands in for real messages, so it obeys MsgSeqNum like one.
+    if (seq > expected) {
+        requestResend(expected, seq);
+        return;
+    }
+    if (seq < expected) {
+        if (!possDup) {
+            tooLow(expected, seq);
+        }
+        return;  // PossDup replay of an old gap-fill
+    }
+    std::int64_t newSeqNo = 0;
+    try {
+        newSeqNo = m.getLong(FixMessage::NEW_SEQ_NO);
+    } catch (const std::invalid_argument& e) {
+        sendReject(seq, e.what());
+        return;
+    }
+    if (!gapFillWindow_ || !possDup) {
+        sendReject(seq, "GapFill outside a resend");
+        return;
+    }
+    if (newSeqNo <= seq) {
+        sendReject(seq, "GapFill NewSeqNo must exceed MsgSeqNum");
+        return;
+    }
+    advanceIncoming(newSeqNo);
 }
 
 void FixSession::applyLogonSeqReset() {
     if (!sentResetLogon_) {
         std::lock_guard<std::recursive_mutex> lock(writeMutex_);
         outgoingSeq_ = 1;
-        store_->saveOutgoingSeq(outgoingSeq_);
+        store_->reset();
+    } else {
+        // This side's store was cleared at construction, and its Logon has
+        // already taken 34=1.
+        store_->saveIncomingSeq(1);
     }
     resendPending_ = false;
+    gapFillWindow_ = false;
     resendTriggerSeq_ = 0;
     expectedIncomingSeq_.store(1);
-    store_->saveIncomingSeq(1);
 }
 
 void FixSession::advanceIncoming(std::int64_t newExpected) {
@@ -641,17 +945,42 @@ void FixSession::advanceIncoming(std::int64_t newExpected) {
     }
 }
 
-void FixSession::handleResendRequest(const FixMessage& m) {
+bool FixSession::isStaleOrder(const FixSessionStore::StoredMessage& stored) const {
+    if (stored.msgType != FixMessage::NEW_ORDER_SINGLE
+        && stored.msgType != FixMessage::ORDER_CANCEL_REQUEST
+        && stored.msgType != FixMessage::ORDER_CANCEL_REPLACE_REQUEST) {
+        return false;  // execution reports must always be recoverable
+    }
+    std::optional<std::int64_t> sent = parseUtcSeconds(stored.sendingTime);
+    if (!sent.has_value()) {
+        return true;
+    }
+    std::int64_t now = std::chrono::duration_cast<std::chrono::seconds>(
+                               std::chrono::system_clock::now().time_since_epoch())
+                               .count();
+    return now - *sent > config_.maxOrderReplayAgeSeconds;
+}
+
+void FixSession::handleResendRequest(const FixMessage& m, std::int64_t requestSeq) {
     std::int64_t begin = m.getLong(FixMessage::BEGIN_SEQ_NO);
     std::int64_t endRequested = m.getLong(FixMessage::END_SEQ_NO);
+    std::int64_t end = 0;
     try {
+        // The lock spans the whole replay so that no live message can take a
+        // sequence number inside the run; `end` is capped at what was really
+        // sent and every send is time-bounded, so the hold is too.
         std::lock_guard<std::recursive_mutex> lock(writeMutex_);
         std::int64_t last = outgoingSeq_ - 1;
-        std::int64_t end = endRequested == 0 ? last : std::min(endRequested, last);
+        if (begin < 1 || begin > last || endRequested < 0
+            || (endRequested != 0 && endRequested < begin)) {
+            sendReject(requestSeq, "invalid ResendRequest range");
+            return;
+        }
+        end = endRequested == 0 ? last : std::min(endRequested, last);
         std::int64_t gapFillStart = -1;
         for (std::int64_t seq = begin; seq <= end; ++seq) {
             std::optional<FixSessionStore::StoredMessage> stored = store_->retrieve(seq);
-            if (!stored.has_value()) {
+            if (!stored.has_value() || isStaleOrder(*stored)) {
                 if (gapFillStart < 0) {
                     gapFillStart = seq;
                 }
@@ -667,10 +996,11 @@ void FixSession::handleResendRequest(const FixMessage& m) {
         if (gapFillStart >= 0) {
             sendGapFill(gapFillStart, end + 1);
         }
-        listener_.onResendServed(begin, end);
     } catch (const std::exception& e) {
         disconnect(std::string("resend failed: ") + e.what());
+        return;
     }
+    listener_.onResendServed(begin, end);
 }
 
 void FixSession::sendGapFill(std::int64_t seq, std::int64_t newSeqNo) {
@@ -683,23 +1013,33 @@ void FixSession::sendGapFill(std::int64_t seq, std::int64_t newSeqNo) {
 void FixSession::heartbeatLoop() {
     std::int64_t intervalNanos = static_cast<std::int64_t>(config_.heartbeatSeconds) * 1'000'000'000LL;
     while (running_.load()) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        {
+            std::unique_lock<std::mutex> lock(stopMutex_);
+            stopCv_.wait_for(lock, std::chrono::milliseconds(100),
+                             [this] { return !running_.load(); });
+        }
         if (!established_.load() || !running_.load()) {
             continue;
         }
         std::int64_t now = nowNanos();
-        if (now - lastSentNanos_.load() >= intervalNanos) {
-            send(FixMessage::builder(FixMessage::HEARTBEAT));
-        }
+        // Staleness first and with no lock: a writer stuck on a dead peer
+        // must not be able to delay this decision.
         std::int64_t silence = now - lastReceivedNanos_.load();
-        if (silence >= intervalNanos * 3 / 2 && !testRequestPending_.load()) {
-            testRequestPending_.store(true);
-            send(FixMessage::builder(FixMessage::TEST_REQUEST)
-                         .field(FixMessage::TEST_REQ_ID, "probe-" + std::to_string(now)));
-        }
         if (silence >= intervalNanos * 5 / 2) {
             disconnect("heartbeat timeout after " + std::to_string(silence / 1'000'000) + "ms of silence");
             return;
+        }
+        if (now - lastSentNanos_.load() >= intervalNanos) {
+            trySend(FixMessage::builder(FixMessage::HEARTBEAT));
+        }
+        // Re-probe if the last TestRequest went unanswered for an interval.
+        if (silence >= intervalNanos * 3 / 2
+            && (!testRequestPending_.load() || now - testRequestSentNanos_ >= intervalNanos)) {
+            testRequestId_.store(now);
+            testRequestSentNanos_ = now;
+            testRequestPending_.store(true);
+            trySend(FixMessage::builder(FixMessage::TEST_REQUEST)
+                            .field(FixMessage::TEST_REQ_ID, "probe-" + std::to_string(now)));
         }
     }
 }
@@ -710,6 +1050,12 @@ void FixSession::disconnect(const std::string& reason) {
         return;
     }
     close();
+    {
+        std::lock_guard<std::mutex> lock(logonMutex_);
+        if (!logonSucceeded_) {
+            failureReason_ = reason;
+        }
+    }
     countDownLogon();   // unblock anyone waiting on establishment
     countDownLogout();
     listener_.onDisconnect(reason);

@@ -29,9 +29,19 @@ bool FixExecReportView::wrap(const std::uint8_t* buffer, std::size_t offset, std
     while (p < end) {
         // ---- tag: digits up to '=' ----
         int tag = 0;
+        std::size_t tagStart = p;
         while (p < end && buffer[p] != '=') {
-            tag = tag * 10 + (buffer[p] - '0');
+            std::uint8_t b = buffer[p];
+            if (b < '0' || b > '9' || p - tagStart >= 9) {
+                execReport_ = false;
+                return false;  // not a FIX field: stop before reading on
+            }
+            tag = tag * 10 + (b - '0');
             ++p;
+        }
+        if (p >= end || p == tagStart) {
+            execReport_ = false;
+            return false;  // truncated: no '=' inside the given length
         }
         ++p;  // skip '='
         std::size_t valueStart = p;
@@ -40,11 +50,12 @@ bool FixExecReportView::wrap(const std::uint8_t* buffer, std::size_t offset, std
         }
         std::size_t valueEnd = p;
         ++p;  // skip SOH
+        const std::uint8_t firstByte = valueEnd > valueStart ? buffer[valueStart] : 0;
 
         switch (tag) {
             case FixMessage::MSG_TYPE: {
                 // 35=8 and nothing else; a one-byte value is required.
-                execReport_ = (valueEnd - valueStart == 1) && buffer[valueStart] == '8';
+                execReport_ = (valueEnd - valueStart == 1) && firstByte == '8';
                 if (!execReport_) {
                     return false;  // not ours: stop scanning immediately
                 }
@@ -58,13 +69,13 @@ bool FixExecReportView::wrap(const std::uint8_t* buffer, std::size_t offset, std
                 clOrdId_ = fix_parse::parseLongOrElse(buf_, valueStart, valueEnd, -1);
                 break;
             case FixMessage::EXEC_TYPE:
-                execType_ = buffer[valueStart];
+                execType_ = firstByte;
                 break;
             case FixMessage::ORD_STATUS:
-                ordStatus_ = buffer[valueStart];
+                ordStatus_ = firstByte;
                 break;
             case FixMessage::SIDE:
-                side_ = buffer[valueStart];
+                side_ = firstByte;
                 break;
             case FixMessage::LAST_QTY:
                 lastQty_ = fix_parse::parseLong(buf_, valueStart, valueEnd);
