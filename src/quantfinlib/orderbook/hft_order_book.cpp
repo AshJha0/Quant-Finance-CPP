@@ -32,26 +32,17 @@ HftOrderBook::HftOrderBook(int minPriceTick, int maxPriceTick, int maxOrders)
         : minTick_(minPriceTick),
           ladder_(checkedLadder(minPriceTick, maxPriceTick, maxOrders)),
           maxOrderQuantity_(std::numeric_limits<std::int64_t>::max() / maxOrders) {
-    bidHead_.assign(ladder_, kNone);
-    bidTail_.assign(ladder_, kNone);
-    askHead_.assign(ladder_, kNone);
-    askTail_.assign(ladder_, kNone);
-    bidQty_.assign(ladder_, 0);
-    askQty_.assign(ladder_, 0);
+    bids_.assign(ladder_, Level{0, kNone, kNone});
+    asks_.assign(ladder_, Level{0, kNone, kNone});
     bidBits_.assign((ladder_ + 63) >> 6, 0);
     askBits_.assign((ladder_ + 63) >> 6, 0);
 
-    nodeId_.assign(maxOrders, 0);
-    nodeQty_.assign(maxOrders, 0);
-    nodeTick_.assign(maxOrders, 0);
-    nodePrev_.assign(maxOrders, 0);
-    nodeNext_.assign(maxOrders, 0);
-    nodeSide_.assign(maxOrders, 0);
-    // Thread the free list through nodeNext_.
+    nodes_.assign(maxOrders, Node{});
+    // Thread the free list through Node::next.
     for (int i = 0; i < maxOrders - 1; i++) {
-        nodeNext_[i] = i + 1;
+        nodes_[i].next = i + 1;
     }
-    nodeNext_[maxOrders - 1] = kNone;
+    nodes_[maxOrders - 1].next = kNone;
     freeHead_ = 0;
 
     // 2x capacity, power of two: max load factor 0.5 keeps probes short
@@ -200,7 +191,7 @@ bool HftOrderBook::fillableWithin(Side side, int priceTick, std::int64_t quantit
         for (int idx = bestAskIdx_; idx != kNone && idx <= limit;
              idx = bp::nextSetAtOrAbove(askBits_.data(), static_cast<int>(askBits_.size()),
                                         idx + 1)) {
-            avail += askQty_[idx];
+            avail += asks_[idx].qty;
             if (avail >= quantity) {
                 return true;
             }
@@ -210,7 +201,7 @@ bool HftOrderBook::fillableWithin(Side side, int priceTick, std::int64_t quantit
         for (int idx = bestBidIdx_; idx != kNone && idx >= limit;
              idx = bp::nextSetAtOrBelow(bidBits_.data(), static_cast<int>(bidBits_.size()),
                                         idx - 1)) {
-            avail += bidQty_[idx];
+            avail += bids_[idx].qty;
             if (avail >= quantity) {
                 return true;
             }
@@ -242,9 +233,9 @@ std::int64_t HftOrderBook::matchBuy(std::int64_t takerId, int limitIdx, std::int
                                     std::int64_t ts) {
     std::int64_t remaining = quantity;
     while (remaining > 0 && bestAskIdx_ != kNone && bestAskIdx_ <= limitIdx) {
-        remaining = fillLevel(askHead_.data(), askTail_.data(), askQty_.data(),
-                              askBits_.data(), bestAskIdx_, takerId, remaining, ts);
-        if (askQty_[bestAskIdx_] == 0) {
+        remaining = fillLevel(asks_[bestAskIdx_], askBits_.data(), bestAskIdx_, takerId,
+                              remaining, ts);
+        if (asks_[bestAskIdx_].qty == 0) {
             bestAskIdx_ = bp::nextSetAtOrAbove(askBits_.data(),
                                                static_cast<int>(askBits_.size()),
                                                bestAskIdx_ + 1);
@@ -258,9 +249,9 @@ std::int64_t HftOrderBook::matchSell(std::int64_t takerId, int limitIdx, std::in
                                      std::int64_t ts) {
     std::int64_t remaining = quantity;
     while (remaining > 0 && bestBidIdx_ != kNone && bestBidIdx_ >= limitIdx) {
-        remaining = fillLevel(bidHead_.data(), bidTail_.data(), bidQty_.data(),
-                              bidBits_.data(), bestBidIdx_, takerId, remaining, ts);
-        if (bidQty_[bestBidIdx_] == 0) {
+        remaining = fillLevel(bids_[bestBidIdx_], bidBits_.data(), bestBidIdx_, takerId,
+                              remaining, ts);
+        if (bids_[bestBidIdx_].qty == 0) {
             bestBidIdx_ = bp::nextSetAtOrBelow(bidBits_.data(),
                                                static_cast<int>(bidBits_.size()),
                                                bestBidIdx_ - 1);
@@ -270,36 +261,37 @@ std::int64_t HftOrderBook::matchSell(std::int64_t takerId, int limitIdx, std::in
 }
 
 /** FIFO-fills one level; returns the taker's remaining quantity. */
-std::int64_t HftOrderBook::fillLevel(int* head, int* tail, std::int64_t* levelQty,
-                                     std::uint64_t* bits, int idx, std::int64_t takerId,
-                                     std::int64_t remaining, std::int64_t ts) {
-    int node = head[idx];
-    while (remaining > 0 && node != kNone) {
-        std::int64_t fill = std::min(remaining, nodeQty_[node]);
+std::int64_t HftOrderBook::fillLevel(Level& level, std::uint64_t* bits, int idx,
+                                     std::int64_t takerId, std::int64_t remaining,
+                                     std::int64_t ts) {
+    int handle = level.head;
+    while (remaining > 0 && handle != kNone) {
+        Node& node = nodes_[handle];
+        std::int64_t fill = std::min(remaining, node.qty);
         remaining -= fill;
-        nodeQty_[node] -= fill;
-        levelQty[idx] -= fill;
+        node.qty -= fill;
+        level.qty -= fill;
         tradeCount_++;
         if (sink_ != nullptr) {
-            sink_(sinkContext_, nodeId_[node], takerId, idx + minTick_, fill, ts);
+            sink_(sinkContext_, node.id, takerId, idx + minTick_, fill, ts);
         }
-        if (nodeQty_[node] == 0) {
+        if (node.qty == 0) {
             // Maker fully filled: pop the head, recycle everything.
-            int next = nodeNext_[node];
-            head[idx] = next;
+            int next = node.next;
+            level.head = next;
             if (next == kNone) {
-                tail[idx] = kNone;
+                level.tail = kNone;
             } else {
-                nodePrev_[next] = kNone;
+                nodes_[next].prev = kNone;
             }
             bp::mapRemoveAt(mapKeys_.data(), mapVals_.data(), mapMask_,
-                            bp::mapFind(mapKeys_.data(), mapMask_, nodeId_[node]));
-            freeNode(node);
+                            bp::mapFind(mapKeys_.data(), mapMask_, node.id));
+            freeNode(handle);
             restingOrders_--;
-            node = next;
+            handle = next;
         }
     }
-    if (levelQty[idx] == 0) {
+    if (level.qty == 0) {
         bits[idx >> 6] &= ~(1ULL << (idx & 63));
     }
     return remaining;
@@ -307,28 +299,21 @@ std::int64_t HftOrderBook::fillLevel(int* head, int* tail, std::int64_t* levelQt
 
 /** Appends a remainder to its level's FIFO tail and indexes it. */
 void HftOrderBook::rest(std::int64_t id, std::uint8_t side, int idx, std::int64_t quantity) {
-    int node = freeHead_;
-    freeHead_ = nodeNext_[node];
-    nodeId_[node] = id;
-    nodeQty_[node] = quantity;
-    nodeTick_[node] = idx;
-    nodeSide_[node] = side;
-    nodeNext_[node] = kNone;
-
-    int* head = side == kBuy ? bidHead_.data() : askHead_.data();
-    int* tail = side == kBuy ? bidTail_.data() : askTail_.data();
-    std::int64_t* qty = side == kBuy ? bidQty_.data() : askQty_.data();
+    int handle = freeHead_;
+    Node& node = nodes_[handle];
+    freeHead_ = node.next;
+    Level& level = side == kBuy ? bids_[idx] : asks_[idx];
     std::uint64_t* bits = side == kBuy ? bidBits_.data() : askBits_.data();
 
-    int t = tail[idx];
-    nodePrev_[node] = t;
+    int t = level.tail;
+    node = Node{id, quantity, idx, t, kNone, side};
     if (t == kNone) {
-        head[idx] = node;
+        level.head = handle;
     } else {
-        nodeNext_[t] = node;
+        nodes_[t].next = handle;
     }
-    tail[idx] = node;
-    qty[idx] += quantity;
+    level.tail = handle;
+    level.qty += quantity;
     bits[idx >> 6] |= 1ULL << (idx & 63);
 
     if (side == kBuy) {
@@ -340,33 +325,30 @@ void HftOrderBook::rest(std::int64_t id, std::uint8_t side, int idx, std::int64_
             bestAskIdx_ = idx;
         }
     }
-    bp::mapPut(mapKeys_.data(), mapVals_.data(), mapMask_, id, node);
+    bp::mapPut(mapKeys_.data(), mapVals_.data(), mapMask_, id, handle);
     restingOrders_++;
 }
 
 /** Removes a (known-resting) node from its level, maintaining best/bitmap. */
-void HftOrderBook::unlink(int node) {
-    int idx = nodeTick_[node];
-    std::uint8_t side = nodeSide_[node];
-    int* head = side == kBuy ? bidHead_.data() : askHead_.data();
-    int* tail = side == kBuy ? bidTail_.data() : askTail_.data();
-    std::int64_t* qty = side == kBuy ? bidQty_.data() : askQty_.data();
+void HftOrderBook::unlink(int handle) {
+    const Node& node = nodes_[handle];
+    int idx = node.tick;
+    std::uint8_t side = node.side;
+    Level& level = side == kBuy ? bids_[idx] : asks_[idx];
     std::uint64_t* bits = side == kBuy ? bidBits_.data() : askBits_.data();
 
-    int prev = nodePrev_[node];
-    int next = nodeNext_[node];
-    if (prev == kNone) {
-        head[idx] = next;
+    if (node.prev == kNone) {
+        level.head = node.next;
     } else {
-        nodeNext_[prev] = next;
+        nodes_[node.prev].next = node.next;
     }
-    if (next == kNone) {
-        tail[idx] = prev;
+    if (node.next == kNone) {
+        level.tail = node.prev;
     } else {
-        nodePrev_[next] = prev;
+        nodes_[node.next].prev = node.prev;
     }
-    qty[idx] -= nodeQty_[node];
-    if (qty[idx] == 0) {
+    level.qty -= node.qty;
+    if (level.qty == 0) {
         bits[idx >> 6] &= ~(1ULL << (idx & 63));
         if (side == kBuy && idx == bestBidIdx_) {
             bestBidIdx_ = bp::nextSetAtOrBelow(bidBits_.data(),
@@ -378,9 +360,9 @@ void HftOrderBook::unlink(int node) {
     }
 }
 
-void HftOrderBook::freeNode(int node) {
-    nodeNext_[node] = freeHead_;
-    freeHead_ = node;
+void HftOrderBook::freeNode(int handle) {
+    nodes_[handle].next = freeHead_;
+    freeHead_ = handle;
 }
 
 // ------------------------------------------------------------------
@@ -396,11 +378,11 @@ int HftOrderBook::bestAskTick() const {
 }
 
 std::int64_t HftOrderBook::bestBidSize() const {
-    return bestBidIdx_ == kNone ? 0 : bidQty_[bestBidIdx_];
+    return bestBidIdx_ == kNone ? 0 : bids_[bestBidIdx_].qty;
 }
 
 std::int64_t HftOrderBook::bestAskSize() const {
-    return bestAskIdx_ == kNone ? 0 : askQty_[bestAskIdx_];
+    return bestAskIdx_ == kNone ? 0 : asks_[bestAskIdx_].qty;
 }
 
 std::int64_t HftOrderBook::qtyAtTick(Side side, int priceTick) const {
@@ -408,12 +390,12 @@ std::int64_t HftOrderBook::qtyAtTick(Side side, int priceTick) const {
     if (idx == kNone) {
         return 0;
     }
-    return side == Side::BUY ? bidQty_[idx] : askQty_[idx];
+    return side == Side::BUY ? bids_[idx].qty : asks_[idx].qty;
 }
 
 std::int64_t HftOrderBook::openQuantity(std::int64_t orderId) const {
     int slot = bp::mapFind(mapKeys_.data(), mapMask_, orderId);
-    return slot == kNone ? 0 : nodeQty_[mapVals_[slot]];
+    return slot == kNone ? 0 : nodes_[mapVals_[slot]].qty;
 }
 
 int HftOrderBook::snapshot(Side side, int* outTicks, std::int64_t* outQtys,
@@ -424,7 +406,7 @@ int HftOrderBook::snapshot(Side side, int* outTicks, std::int64_t* outQtys,
              idx = bp::nextSetAtOrBelow(bidBits_.data(), static_cast<int>(bidBits_.size()),
                                         idx - 1)) {
             outTicks[n] = idx + minTick_;
-            outQtys[n] = bidQty_[idx];
+            outQtys[n] = bids_[idx].qty;
             n++;
         }
     } else {
@@ -432,7 +414,7 @@ int HftOrderBook::snapshot(Side side, int* outTicks, std::int64_t* outQtys,
              idx = bp::nextSetAtOrAbove(askBits_.data(), static_cast<int>(askBits_.size()),
                                         idx + 1)) {
             outTicks[n] = idx + minTick_;
-            outQtys[n] = askQty_[idx];
+            outQtys[n] = asks_[idx].qty;
             n++;
         }
     }

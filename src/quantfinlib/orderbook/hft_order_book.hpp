@@ -1,7 +1,8 @@
 // Port of com.quantfinlib.orderbook.HftOrderBook (Java): venue-grade
 // price-time-priority matching engine, the zero-allocation sibling of
 // OrderBook. Dense integer-tick price ladder, occupancy bitmaps, pooled
-// intrusive order nodes in parallel primitive arrays, a primitive
+// intrusive order nodes (one 32-byte struct each, so an order never straddles
+// a cache line), 16-byte level records, a primitive
 // open-addressing id map with backward-shift deletion, and a single
 // function-pointer TradeSink (the Java primitive callback interface).
 //
@@ -167,13 +168,31 @@ private:
     static constexpr std::uint8_t kSell = 1;
     static constexpr int kNone = -1;
 
+    /** One price level on one side: FIFO ends and total resting quantity. */
+    struct Level {
+        std::int64_t qty;
+        int head;
+        int tail;
+    };
+    static_assert(sizeof(Level) == 16);
+
+    /** One resting order; prev/next link its level, next also threads the free list. */
+    struct alignas(32) Node {
+        std::int64_t id;
+        std::int64_t qty;
+        int tick;                            // ladder slot, not absolute tick
+        int prev;
+        int next;
+        std::uint8_t side;
+    };
+    static_assert(sizeof(Node) == 32);
+
     std::int64_t matchBuy(std::int64_t takerId, int limitIdx, std::int64_t quantity,
                           std::int64_t ts);
     std::int64_t matchSell(std::int64_t takerId, int limitIdx, std::int64_t quantity,
                            std::int64_t ts);
-    std::int64_t fillLevel(int* head, int* tail, std::int64_t* levelQty, std::uint64_t* bits,
-                           int idx, std::int64_t takerId, std::int64_t remaining,
-                           std::int64_t ts);
+    std::int64_t fillLevel(Level& level, std::uint64_t* bits, int idx, std::int64_t takerId,
+                           std::int64_t remaining, std::int64_t ts);
     void rest(std::int64_t id, std::uint8_t side, int idx, std::int64_t quantity);
     void unlink(int node);
     void freeNode(int node);
@@ -190,27 +209,18 @@ private:
     const int ladder_;                       // number of price levels per side
     const std::int64_t maxOrderQuantity_;
 
-    // Per-side level queues: head/tail node index per tick slot, total resting qty.
-    std::vector<int> bidHead_;
-    std::vector<int> bidTail_;
-    std::vector<std::int64_t> bidQty_;
-    std::vector<int> askHead_;
-    std::vector<int> askTail_;
-    std::vector<std::int64_t> askQty_;
+    // Per-side level queues, indexed by ladder slot.
+    std::vector<Level> bids_;
+    std::vector<Level> asks_;
     // Occupancy bitmaps: bit i set = level i has resting orders on that side.
     std::vector<std::uint64_t> bidBits_;
     std::vector<std::uint64_t> askBits_;
     int bestBidIdx_ = kNone;                 // highest occupied bid slot
     int bestAskIdx_ = kNone;                 // lowest occupied ask slot
 
-    // Intrusive node pool (parallel primitive arrays; index = node handle).
-    std::vector<std::int64_t> nodeId_;
-    std::vector<std::int64_t> nodeQty_;
-    std::vector<int> nodeTick_;              // ladder slot, not absolute tick
-    std::vector<int> nodePrev_;
-    std::vector<int> nodeNext_;
-    std::vector<std::uint8_t> nodeSide_;
-    int freeHead_;                           // free-list threaded through nodeNext_
+    // Intrusive node pool (index = node handle).
+    std::vector<Node> nodes_;
+    int freeHead_;                           // free list threaded through Node::next
 
     // Open-addressing id -> node map (linear probing, backward-shift delete).
     // Key 0 = empty slot, which is safe because ids start at 1.
