@@ -4,6 +4,7 @@
 #include <cmath>
 #include <limits>
 #include <stdexcept>
+#include <string>
 
 #if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
 #include <immintrin.h>
@@ -14,16 +15,34 @@
 
 namespace quantfinlib {
 
+namespace {
+int checkedMaxSymbols(int maxSymbols) {
+    if (maxSymbols <= 0) {
+        throw std::invalid_argument("maxSymbols must be positive");
+    }
+    return maxSymbols;
+}
+}  // namespace
+
 HftMarketDataBus::HftMarketDataBus(int ringCapacity, int maxSymbols, bool busySpin)
         : ring_(ringCapacity),
-          maxSymbols_(maxSymbols),
+          maxSymbols_(checkedMaxSymbols(maxSymbols)),
           busySpin_(busySpin),
           latestPrice_(new std::atomic<double>[static_cast<std::size_t>(maxSymbols)]),
           symbolListeners_(static_cast<std::size_t>(maxSymbols)) {
     double nan = std::numeric_limits<double>::quiet_NaN();
     for (int i = 0; i < maxSymbols; i++) {
         latestPrice_[static_cast<std::size_t>(i)].store(nan, std::memory_order_relaxed);
+        symbolListeners_[static_cast<std::size_t>(i)].store(nullptr, std::memory_order_relaxed);
     }
+}
+
+HftMarketDataBus::~HftMarketDataBus() {
+    stop();
+    for (auto& slot : symbolListeners_) {
+        delete slot.load(std::memory_order_acquire);
+    }
+    delete globalListeners_.load(std::memory_order_acquire);
 }
 
 int HftMarketDataBus::registerSymbol(const std::string& symbol) {
@@ -34,25 +53,40 @@ int HftMarketDataBus::registerSymbol(const std::string& symbol) {
     return id;
 }
 
-void HftMarketDataBus::subscribe(int symbolId, TickListener listener) {
+void HftMarketDataBus::addListener(std::atomic<const ListenerList*>& slot,
+                                   TickListener listener) {
+    if (!listener) {
+        throw std::invalid_argument("listener is empty");
+    }
     std::lock_guard<std::mutex> lock(setupMutex_);
-    auto& slot = symbolListeners_[static_cast<std::size_t>(symbolId)];
-    ListenerVecPtr cur = slot.load(std::memory_order_acquire);
-    auto next = std::make_shared<ListenerVec>(cur ? *cur : ListenerVec{});
-    next->push_back(std::move(listener));
-    slot.store(std::move(next), std::memory_order_release);
+    const ListenerList* cur = slot.load(std::memory_order_acquire);
+    auto next = std::make_unique<ListenerList>();
+    next->reserve((cur ? cur->size() : 0) + 1);
+    if (cur) {
+        *next = *cur;
+    }
+    retired_.reserve(retired_.size() + 1);
+    listeners_.push_back(std::move(listener));
+    next->push_back(&listeners_.back());
+    slot.store(next.release(), std::memory_order_release);
+    if (cur) {
+        retired_.emplace_back(cur);
+    }
+}
+
+void HftMarketDataBus::subscribe(int symbolId, TickListener listener) {
+    if (!validSymbol(symbolId)) {
+        throw std::out_of_range("symbolId " + std::to_string(symbolId) + " out of range");
+    }
+    addListener(symbolListeners_[static_cast<std::size_t>(symbolId)], std::move(listener));
 }
 
 void HftMarketDataBus::subscribeAll(TickListener listener) {
-    std::lock_guard<std::mutex> lock(setupMutex_);
-    ListenerVecPtr cur = globalListeners_.load(std::memory_order_acquire);
-    auto next = std::make_shared<ListenerVec>(cur ? *cur : ListenerVec{});
-    next->push_back(std::move(listener));
-    globalListeners_.store(std::move(next), std::memory_order_release);
+    addListener(globalListeners_, std::move(listener));
 }
 
 void HftMarketDataBus::start() {
-    std::lock_guard<std::mutex> lock(setupMutex_);
+    std::lock_guard<std::mutex> lock(lifecycleMutex_);
     if (running_.load(std::memory_order_acquire)) {
         return;
     }
@@ -61,41 +95,55 @@ void HftMarketDataBus::start() {
 }
 
 void HftMarketDataBus::stop() {
-    std::thread toJoin;
-    {
-        std::lock_guard<std::mutex> lock(setupMutex_);
-        running_.store(false, std::memory_order_release);
-        toJoin = std::move(consumer_);
+    std::lock_guard<std::mutex> lock(lifecycleMutex_);
+    running_.store(false, std::memory_order_release);
+    if (consumer_.joinable()) {
+        consumer_.join();
     }
-    if (toJoin.joinable()) {
-        toJoin.join();
-    }
+    // No consumer exists now and none can start while we hold the lifecycle
+    // lock, so nothing can still be reading a retired list.
+    std::lock_guard<std::mutex> setup(setupMutex_);
+    retired_.clear();
 }
 
 bool HftMarketDataBus::publish(int symbolId, double price, double size,
                                 std::int64_t timestampNanos) {
+    if (!validSymbol(symbolId)) {
+        invalidSymbol_.store(invalidSymbol_.load(std::memory_order_relaxed) + 1,
+                             std::memory_order_relaxed);
+        return false;
+    }
     bool ok = ring_.publish(symbolId, price, size, timestampNanos);
     if (!ok) {
-        ringFull_++;
+        ringFull_.store(ringFull_.load(std::memory_order_relaxed) + 1,
+                        std::memory_order_relaxed);
     }
     return ok;
+}
+
+void HftMarketDataBus::invoke(const ListenerList& list, int symbolId, double price, double size,
+                              std::int64_t timestampNanos) {
+    for (const TickListener* l : list) {
+        try {
+            (*l)(symbolId, price, size, timestampNanos);
+        } catch (...) {
+            listenerErrors_.store(listenerErrors_.load(std::memory_order_relaxed) + 1,
+                                  std::memory_order_relaxed);
+        }
+    }
 }
 
 void HftMarketDataBus::dispatch(int symbolId, double price, double size,
                                  std::int64_t timestampNanos) {
     latestPrice_[static_cast<std::size_t>(symbolId)].store(price, std::memory_order_relaxed);
-    ListenerVecPtr ls = symbolListeners_[static_cast<std::size_t>(symbolId)].load(
-            std::memory_order_acquire);
-    if (ls) {
-        for (const auto& l : *ls) {
-            l(symbolId, price, size, timestampNanos);
-        }
+    const ListenerList* ls =
+            symbolListeners_[static_cast<std::size_t>(symbolId)].load(std::memory_order_acquire);
+    if (ls != nullptr) {
+        invoke(*ls, symbolId, price, size, timestampNanos);
     }
-    ListenerVecPtr gs = globalListeners_.load(std::memory_order_acquire);
-    if (gs) {
-        for (const auto& l : *gs) {
-            l(symbolId, price, size, timestampNanos);
-        }
+    const ListenerList* gs = globalListeners_.load(std::memory_order_acquire);
+    if (gs != nullptr) {
+        invoke(*gs, symbolId, price, size, timestampNanos);
     }
 }
 
@@ -123,6 +171,9 @@ void HftMarketDataBus::consumeLoop() {
 }
 
 double HftMarketDataBus::latestPrice(int symbolId) const {
+    if (!validSymbol(symbolId)) {
+        return std::numeric_limits<double>::quiet_NaN();
+    }
     return latestPrice_[static_cast<std::size_t>(symbolId)].load(std::memory_order_relaxed);
 }
 

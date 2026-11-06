@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <limits>
 #include <stdexcept>
 
 #include "quantfinlib/orderbook/book_primitives.hpp"
@@ -10,12 +11,27 @@ namespace quantfinlib {
 
 namespace bp = book_primitives;
 
+namespace {
+
+/** Validated before any member is sized; the span is formed in 64 bits. */
+int checkedLadder(int minPriceTick, int maxPriceTick, int maxOrders) {
+    std::int64_t ladder = static_cast<std::int64_t>(maxPriceTick) - minPriceTick + 1;
+    if (ladder <= 0 || ladder > HftOrderBook::MAX_LADDER || maxOrders <= 0
+            || minPriceTick == HftOrderBook::NO_BID || maxPriceTick == HftOrderBook::NO_ASK
+            || maxOrders > HftOrderBook::MAX_ORDERS) {
+        throw std::invalid_argument(
+                "need maxPriceTick >= minPriceTick, a ladder within MAX_LADDER, ticks clear "
+                "of the NO_BID/NO_ASK sentinels and 0 < maxOrders <= MAX_ORDERS");
+    }
+    return static_cast<int>(ladder);
+}
+
+}  // namespace
+
 HftOrderBook::HftOrderBook(int minPriceTick, int maxPriceTick, int maxOrders)
         : minTick_(minPriceTick),
-          ladder_(maxPriceTick - minPriceTick + 1) {
-    if (maxPriceTick < minPriceTick || maxOrders <= 0) {
-        throw std::invalid_argument("need maxPriceTick >= minPriceTick, maxOrders > 0");
-    }
+          ladder_(checkedLadder(minPriceTick, maxPriceTick, maxOrders)),
+          maxOrderQuantity_(std::numeric_limits<std::int64_t>::max() / maxOrders) {
     bidHead_.assign(ladder_, kNone);
     bidTail_.assign(ladder_, kNone);
     askHead_.assign(ladder_, kNone);
@@ -61,8 +77,11 @@ std::int64_t HftOrderBook::submitLimit(Side side, int priceTick, std::int64_t qu
     if (quantity <= 0) {
         return REJECT_INVALID;
     }
-    int idx = priceTick - minTick_;
-    if (idx < 0 || idx >= ladder_) {
+    if (quantity > maxOrderQuantity_) {
+        return REJECT_QUANTITY_LIMIT;
+    }
+    int idx = ladderIdx(priceTick);
+    if (idx == kNone) {
         return REJECT_OUT_OF_BAND;
     }
     std::int64_t id = nextId_++;
@@ -84,7 +103,7 @@ std::int64_t HftOrderBook::submitLimit(Side side, int priceTick, std::int64_t qu
 
 std::int64_t HftOrderBook::submitMarket(Side side, std::int64_t quantity,
                                         std::int64_t timestampNanos) {
-    if (quantity <= 0) {
+    if (!validQuantity(quantity)) {
         return 0;
     }
     std::int64_t id = nextId_++;
@@ -97,7 +116,7 @@ std::int64_t HftOrderBook::submitMarket(Side side, std::int64_t quantity,
 
 std::int64_t HftOrderBook::submitIoc(Side side, int priceTick, std::int64_t quantity,
                                      std::int64_t timestampNanos) {
-    if (quantity <= 0) {
+    if (!validQuantity(quantity)) {
         return 0;
     }
     std::int64_t id = nextId_++;
@@ -111,6 +130,11 @@ std::int64_t HftOrderBook::submitIoc(Side side, int priceTick, std::int64_t quan
                     ? matchBuy(id, buyLimitIdx(priceTick), quantity, timestampNanos)
                     : matchSell(id, sellLimitIdx(priceTick), quantity, timestampNanos);
     return quantity - remaining;
+}
+
+int HftOrderBook::ladderIdx(int priceTick) const {
+    std::int64_t d = static_cast<std::int64_t>(priceTick) - minTick_;
+    return d < 0 || d >= ladder_ ? kNone : static_cast<int>(d);
 }
 
 /** Buy limit as a ladder index, overflow-safe: [-1 = uncrossable, ladder-1 = market]. */
@@ -131,7 +155,7 @@ int HftOrderBook::sellLimitIdx(int priceTick) const {
 
 std::int64_t HftOrderBook::submitFok(Side side, int priceTick, std::int64_t quantity,
                                      std::int64_t timestampNanos) {
-    if (quantity <= 0 || !fillableWithin(side, priceTick, quantity)) {
+    if (!validQuantity(quantity) || !fillableWithin(side, priceTick, quantity)) {
         return 0;
     }
     return submitIoc(side, priceTick, quantity, timestampNanos);
@@ -143,8 +167,11 @@ std::int64_t HftOrderBook::submitPostOnly(Side side, int priceTick, std::int64_t
     if (quantity <= 0) {
         return REJECT_INVALID;
     }
-    int idx = priceTick - minTick_;
-    if (idx < 0 || idx >= ladder_) {
+    if (quantity > maxOrderQuantity_) {
+        return REJECT_QUANTITY_LIMIT;
+    }
+    int idx = ladderIdx(priceTick);
+    if (idx == kNone) {
         return REJECT_OUT_OF_BAND;
     }
     bool crosses = side == Side::BUY
@@ -377,8 +404,8 @@ std::int64_t HftOrderBook::bestAskSize() const {
 }
 
 std::int64_t HftOrderBook::qtyAtTick(Side side, int priceTick) const {
-    int idx = priceTick - minTick_;
-    if (idx < 0 || idx >= ladder_) {
+    int idx = ladderIdx(priceTick);
+    if (idx == kNone) {
         return 0;
     }
     return side == Side::BUY ? bidQty_[idx] : askQty_[idx];

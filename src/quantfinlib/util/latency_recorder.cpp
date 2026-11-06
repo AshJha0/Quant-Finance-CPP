@@ -35,6 +35,10 @@ std::int64_t LatencyRecorder::percentile(double p) const {
     if (count_ == 0) {
         return 0;
     }
+    if (!(p >= 0.0)) {   // also catches NaN, whose cast below would be undefined
+        p = 0.0;
+    }
+    p = std::min(p, 1.0);
     std::int64_t target = static_cast<std::int64_t>(std::ceil(p * static_cast<double>(count_)));
     if (target <= 0) {
         target = 1;
